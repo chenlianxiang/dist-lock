@@ -5,6 +5,7 @@ import com.distlock.core.spi.LockStorageProvider;
 import com.distlock.core.exception.LockStorageException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -73,7 +74,14 @@ public final class DatabaseLockStorageProvider implements LockStorageProvider {
 
     @Override
     public LockAcquisition tryAcquire(String lockKey, String owner, long leaseMillis) {
-        return inNewTransaction(() -> doTryAcquire(lockKey, owner, leaseMillis));
+        try {
+            return inNewTransaction(() -> doTryAcquire(lockKey, owner, leaseMillis));
+        } catch (LockStorageException exception) {
+            if (hasCause(exception, CannotAcquireLockException.class)) {
+                return LockAcquisition.contended();
+            }
+            throw exception;
+        }
     }
 
     private LockAcquisition doTryAcquire(String lockKey, String owner, long leaseMillis) {
@@ -175,5 +183,16 @@ public final class DatabaseLockStorageProvider implements LockStorageProvider {
             throw new IllegalStateException("Lock transaction returned null");
         }
         return result;
+    }
+
+    private static boolean hasCause(Throwable failure, Class<? extends Throwable> causeType) {
+        Throwable current = failure;
+        while (current != null) {
+            if (causeType.isInstance(current)) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 }
