@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.boot.test.context.FilteredClassLoader;
 
 import java.util.function.Function;
 
@@ -70,6 +71,17 @@ class DistributedLockAutoConfigurationTest {
                             .hasRootCauseInstanceOf(IllegalStateException.class)
                             .hasRootCauseMessage("Configured default lock strategy [REDIS] is not available. "
                                     + "Registered strategies: [DATABASE]");
+                });
+    }
+
+    @Test
+    void actuatorRemainsTrulyOptional() {
+        contextRunner
+                .withClassLoader(new FilteredClassLoader("org.springframework.boot.actuate"))
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).doesNotHaveBean("distributedLockHealthIndicator");
+                    assertThat(context).hasBean("distributedLocker");
                 });
     }
 }

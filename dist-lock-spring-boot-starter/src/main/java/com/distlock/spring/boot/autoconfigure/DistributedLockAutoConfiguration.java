@@ -157,13 +157,17 @@ public class DistributedLockAutoConfiguration {
         return new MicrometerLockMetrics(registry);
     }
 
-    @Bean(name = "distributedLockHealthIndicator")
+    @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass(HealthIndicator.class)
-    @ConditionalOnMissingBean(name = "distributedLockHealthIndicator")
-    public HealthIndicator distributedLockHealthIndicator(
-            Map<String, LockStorageProvider> providers,
-            Map<String, WatchdogCoordinator> watchdogs) {
-        return new DistributedLockHealthIndicator(providers, watchdogs);
+    public static class ActuatorLockConfiguration {
+
+        @Bean(name = "distributedLockHealthIndicator")
+        @ConditionalOnMissingBean(name = "distributedLockHealthIndicator")
+        public HealthIndicator distributedLockHealthIndicator(
+                Map<String, LockStorageProvider> providers,
+                Map<String, WatchdogCoordinator> watchdogs) {
+            return new DistributedLockHealthIndicator(providers, watchdogs);
+        }
     }
 
     private static LockConfig createConfig(DistributedLockProperties properties) {
