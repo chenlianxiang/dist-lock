@@ -28,6 +28,12 @@ public class DistributedLockProperties {
      */
     private boolean watchdogEnabled = true;
 
+    /** 看门狗调度线程数。 */
+    private int watchdogThreads = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
+
+    /** 单次数据库锁事务与 SQL 超时（毫秒）。 */
+    private long databaseOperationTimeout = 3000;
+
     public enum StorageType {
         DATABASE,
         REDIS,
@@ -64,5 +70,27 @@ public class DistributedLockProperties {
 
     public void setWatchdogEnabled(boolean watchdogEnabled) {
         this.watchdogEnabled = watchdogEnabled;
+    }
+
+    public int getWatchdogThreads() {
+        return watchdogThreads;
+    }
+
+    public void setWatchdogThreads(int watchdogThreads) {
+        if (watchdogThreads <= 0) {
+            throw new IllegalArgumentException("watchdogThreads must be greater than 0");
+        }
+        this.watchdogThreads = watchdogThreads;
+    }
+
+    public long getDatabaseOperationTimeout() {
+        return databaseOperationTimeout;
+    }
+
+    public void setDatabaseOperationTimeout(long databaseOperationTimeout) {
+        if (databaseOperationTimeout <= 0) {
+            throw new IllegalArgumentException("databaseOperationTimeout must be greater than 0");
+        }
+        this.databaseOperationTimeout = databaseOperationTimeout;
     }
 }

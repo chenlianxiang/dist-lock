@@ -5,6 +5,7 @@ import com.distlock.core.api.DistributedLocker;
 import com.distlock.core.api.LockConfig;
 import com.distlock.core.api.LockStrategy;
 import com.distlock.core.api.RoutingDistributedLocker;
+import com.distlock.core.metrics.LockMetrics;
 import com.distlock.core.spi.LockStorageProvider;
 import com.distlock.core.watchdog.WatchdogCoordinator;
 import com.distlock.provider.db.DatabaseLockStorageProvider;
@@ -16,13 +17,16 @@ import org.springframework.boot.autoconfigure.AutoConfigureAfter;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.actuate.health.HealthIndicator;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import io.micrometer.core.instrument.MeterRegistry;
 
 import javax.sql.DataSource;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -51,16 +55,32 @@ public class DistributedLockAutoConfiguration {
 
         @Bean(name = "databaseLockStorageProvider")
         @ConditionalOnMissingBean(name = "databaseLockStorageProvider")
-        public LockStorageProvider databaseLockStorageProvider(DataSource dataSource) {
-            return new DatabaseLockStorageProvider(dataSource);
+        public LockStorageProvider databaseLockStorageProvider(DataSource dataSource,
+                                                               DistributedLockProperties properties) {
+            return new DatabaseLockStorageProvider(dataSource,
+                    Duration.ofMillis(properties.getDatabaseOperationTimeout()));
+        }
+
+        @Bean(name = "databaseLockWatchdog", destroyMethod = "shutdown")
+        @ConditionalOnMissingBean(name = "databaseLockWatchdog")
+        public WatchdogCoordinator databaseLockWatchdog(
+                @Qualifier("databaseLockStorageProvider") LockStorageProvider storageProvider,
+                DistributedLockProperties properties,
+                ObjectProvider<LockMetrics> metricsProvider) {
+            return new WatchdogCoordinator(storageProvider, properties.getWatchdogThreads(),
+                    LockStrategy.DATABASE.name(), metricsProvider.getIfAvailable(() -> LockMetrics.NOOP));
         }
 
         @Bean(name = "dbLocker")
         @ConditionalOnMissingBean(name = "dbLocker")
-        public DefaultDistributedLocker dbLocker(@Qualifier("databaseLockStorageProvider") LockStorageProvider storageProvider,
-                                                 DistributedLockProperties properties) {
+        public DefaultDistributedLocker dbLocker(
+                @Qualifier("databaseLockStorageProvider") LockStorageProvider storageProvider,
+                @Qualifier("databaseLockWatchdog") WatchdogCoordinator watchdog,
+                DistributedLockProperties properties,
+                ObjectProvider<LockMetrics> metricsProvider) {
             LockConfig config = createConfig(properties);
-            return new DefaultDistributedLocker(storageProvider, new WatchdogCoordinator(storageProvider), config, LockStrategy.DATABASE);
+            return new DefaultDistributedLocker(storageProvider, watchdog, config, LockStrategy.DATABASE,
+                    metricsProvider.getIfAvailable(() -> LockMetrics.NOOP));
         }
     }
 
@@ -78,12 +98,26 @@ public class DistributedLockAutoConfiguration {
             return new RedisLockStorageProvider(redisTemplate);
         }
 
+        @Bean(name = "redisLockWatchdog", destroyMethod = "shutdown")
+        @ConditionalOnMissingBean(name = "redisLockWatchdog")
+        public WatchdogCoordinator redisLockWatchdog(
+                @Qualifier("redisLockStorageProvider") LockStorageProvider storageProvider,
+                DistributedLockProperties properties,
+                ObjectProvider<LockMetrics> metricsProvider) {
+            return new WatchdogCoordinator(storageProvider, properties.getWatchdogThreads(),
+                    LockStrategy.REDIS.name(), metricsProvider.getIfAvailable(() -> LockMetrics.NOOP));
+        }
+
         @Bean(name = "redisLocker")
         @ConditionalOnMissingBean(name = "redisLocker")
-        public DefaultDistributedLocker redisLocker(@Qualifier("redisLockStorageProvider") LockStorageProvider storageProvider,
-                                                    DistributedLockProperties properties) {
+        public DefaultDistributedLocker redisLocker(
+                @Qualifier("redisLockStorageProvider") LockStorageProvider storageProvider,
+                @Qualifier("redisLockWatchdog") WatchdogCoordinator watchdog,
+                DistributedLockProperties properties,
+                ObjectProvider<LockMetrics> metricsProvider) {
             LockConfig config = createConfig(properties);
-            return new DefaultDistributedLocker(storageProvider, new WatchdogCoordinator(storageProvider), config, LockStrategy.REDIS);
+            return new DefaultDistributedLocker(storageProvider, watchdog, config, LockStrategy.REDIS,
+                    metricsProvider.getIfAvailable(() -> LockMetrics.NOOP));
         }
     }
 
@@ -109,6 +143,22 @@ public class DistributedLockAutoConfiguration {
                 : LockStrategy.DATABASE.name();
 
         return new RoutingDistributedLocker(lockerMap, defaultStrategy);
+    }
+
+    @Bean
+    @ConditionalOnBean(MeterRegistry.class)
+    @ConditionalOnMissingBean(LockMetrics.class)
+    public LockMetrics distributedLockMetrics(MeterRegistry registry) {
+        return new MicrometerLockMetrics(registry);
+    }
+
+    @Bean(name = "distributedLockHealthIndicator")
+    @ConditionalOnClass(HealthIndicator.class)
+    @ConditionalOnMissingBean(name = "distributedLockHealthIndicator")
+    public HealthIndicator distributedLockHealthIndicator(
+            Map<String, LockStorageProvider> providers,
+            Map<String, WatchdogCoordinator> watchdogs) {
+        return new DistributedLockHealthIndicator(providers, watchdogs);
     }
 
     private static LockConfig createConfig(DistributedLockProperties properties) {

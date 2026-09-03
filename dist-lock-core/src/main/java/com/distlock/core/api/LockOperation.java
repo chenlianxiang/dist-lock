@@ -18,7 +18,7 @@ public final class LockOperation {
 
     @FunctionalInterface
     interface Executor {
-        LockOutcome<?> execute(Snapshot snapshot, Supplier<?> action);
+        LockOutcome<?> execute(Snapshot snapshot, Function<LockHandle, ?> action);
     }
 
     record Snapshot(Class<?> namespace,
@@ -123,7 +123,8 @@ public final class LockOperation {
     }
 
     public <R> R call(Supplier<R> action) {
-        return tryCall(action).getOrThrow();
+        Objects.requireNonNull(action, "action must not be null");
+        return callWithHandle(ignored -> action.get());
     }
 
     public void run(Runnable action) {
@@ -135,6 +136,15 @@ public final class LockOperation {
     }
 
     public <R> LockOutcome<R> tryCall(Supplier<R> action) {
+        Objects.requireNonNull(action, "action must not be null");
+        return tryCallWithHandle(ignored -> action.get());
+    }
+
+    public <R> R callWithHandle(Function<LockHandle, R> action) {
+        return tryCallWithHandle(action).getOrThrow();
+    }
+
+    public <R> LockOutcome<R> tryCallWithHandle(Function<LockHandle, R> action) {
         Objects.requireNonNull(action, "action must not be null");
         @SuppressWarnings("unchecked")
         LockOutcome<R> outcome = (LockOutcome<R>) executor.execute(snapshot, action);

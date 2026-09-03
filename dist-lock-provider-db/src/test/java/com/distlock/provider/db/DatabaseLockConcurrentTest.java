@@ -257,8 +257,8 @@ class DatabaseLockConcurrentTest {
     @DisplayName("集合批量加锁部分失败自动原子回滚与特制报错")
     void testBatchLockRollbackAndCustomError() throws Exception {
         String occupiedKey = lockKey(SkuStock.class, String.class, "SKU-002");
-        boolean preOccupied = storageProvider.tryAcquire(occupiedKey, "external-holder", 2000);
-        assertThat(preOccupied).isTrue();
+        var preOccupied = storageProvider.tryAcquire(occupiedKey, "external-holder", 2000);
+        assertThat(preOccupied.acquired()).isTrue();
 
         List<SkuStock> batch = Arrays.asList(new SkuStock("SKU-001"), new SkuStock("SKU-002"), new SkuStock("SKU-003"));
 
@@ -273,8 +273,8 @@ class DatabaseLockConcurrentTest {
 
         // 验证已获取的 SKU-001 已经被自动回滚释放
         String sku1Key = lockKey(SkuStock.class, String.class, "SKU-001");
-        boolean canAcquireSku1 = storageProvider.tryAcquire(sku1Key, "new-owner", 1000);
-        assertThat(canAcquireSku1).as("SKU-001 在批量失败后应已被逆序回滚释放").isTrue();
+        var canAcquireSku1 = storageProvider.tryAcquire(sku1Key, "new-owner", 1000);
+        assertThat(canAcquireSku1.acquired()).as("SKU-001 在批量失败后应已被逆序回滚释放").isTrue();
         storageProvider.release(sku1Key, "new-owner");
 
         storageProvider.release(occupiedKey, "external-holder");
@@ -285,8 +285,8 @@ class DatabaseLockConcurrentTest {
     void testSameOwnerCannotReenter() {
         String lockKey = lockKey(Order.class, String.class, "ORD-REENTRANT");
 
-        assertThat(storageProvider.tryAcquire(lockKey, "same-owner", 5000)).isTrue();
-        assertThat(storageProvider.tryAcquire(lockKey, "same-owner", 5000)).isFalse();
+        assertThat(storageProvider.tryAcquire(lockKey, "same-owner", 5000).acquired()).isTrue();
+        assertThat(storageProvider.tryAcquire(lockKey, "same-owner", 5000).acquired()).isFalse();
         assertThat(storageProvider.release(lockKey, "same-owner")).isTrue();
     }
 

@@ -3,8 +3,12 @@ package com.distlock.core.api;
 import com.distlock.core.backoff.AdaptiveBackoff;
 import com.distlock.core.context.LockOwner;
 import com.distlock.core.exception.LockAcquisitionException;
+import com.distlock.core.exception.LockLostException;
+import com.distlock.core.metrics.LockMetrics;
 import com.distlock.core.spi.LockStorageProvider;
+import com.distlock.core.spi.LockAcquisition;
 import com.distlock.core.watchdog.WatchdogCoordinator;
+import com.distlock.core.watchdog.WatchdogLease;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -12,11 +16,12 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
-import java.util.function.Supplier;
 
 /**
  * 绑定单一存储策略的默认锁执行器。
@@ -30,6 +35,7 @@ public class DefaultDistributedLocker implements DistributedLocker {
     private final WatchdogCoordinator watchdogCoordinator;
     private final LockConfig defaultConfig;
     private final LockStrategy currentStrategy;
+    private final LockMetrics metrics;
 
     public DefaultDistributedLocker(LockStorageProvider storageProvider) {
         this(storageProvider, LockStrategy.DATABASE);
@@ -49,10 +55,19 @@ public class DefaultDistributedLocker implements DistributedLocker {
                                     WatchdogCoordinator watchdogCoordinator,
                                     LockConfig defaultConfig,
                                     LockStrategy strategy) {
+        this(storageProvider, watchdogCoordinator, defaultConfig, strategy, LockMetrics.NOOP);
+    }
+
+    public DefaultDistributedLocker(LockStorageProvider storageProvider,
+                                    WatchdogCoordinator watchdogCoordinator,
+                                    LockConfig defaultConfig,
+                                    LockStrategy strategy,
+                                    LockMetrics metrics) {
         this.storageProvider = Objects.requireNonNull(storageProvider, "storageProvider must not be null");
         this.watchdogCoordinator = Objects.requireNonNull(watchdogCoordinator, "watchdogCoordinator must not be null");
         this.defaultConfig = Objects.requireNonNull(defaultConfig, "defaultConfig must not be null");
         this.currentStrategy = strategy != null ? strategy : LockStrategy.DATABASE;
+        this.metrics = Objects.requireNonNull(metrics, "metrics must not be null");
     }
 
     public LockStrategy getCurrentStrategy() {
@@ -65,7 +80,8 @@ public class DefaultDistributedLocker implements DistributedLocker {
         return LockOperation.create(resourceOrResources, keyExtractor, this::execute);
     }
 
-    private LockOutcome<?> execute(LockOperation.Snapshot snapshot, Supplier<?> action) {
+    private LockOutcome<?> execute(LockOperation.Snapshot snapshot, Function<LockHandle, ?> action) {
+        long executionStartNanos = System.nanoTime();
         if (snapshot.strategy() != null
                 && !snapshot.strategy().name().equalsIgnoreCase(currentStrategy.name())) {
             throw new IllegalStateException("Locker is bound to strategy [" + currentStrategy.name()
@@ -90,6 +106,8 @@ public class DefaultDistributedLocker implements DistributedLocker {
         long waitBudgetNanos = TimeUnit.MILLISECONDS.toNanos(waitTimeoutMillis);
         long waitStartNanos = System.nanoTime();
         List<String> acquiredKeys = new ArrayList<>(sortedKeys.size());
+        List<LockLease> acquiredLeases = new ArrayList<>(sortedKeys.size());
+        Map<String, WatchdogLease> watchdogLeases = new LinkedHashMap<>();
         AdaptiveBackoff backoff = new AdaptiveBackoff();
 
         try {
@@ -98,10 +116,13 @@ public class DefaultDistributedLocker implements DistributedLocker {
                 backoff.reset();
 
                 while (true) {
-                    if (storageProvider.tryAcquire(lockKey, owner, leaseMillis)) {
+                    LockAcquisition acquisition = storageProvider.tryAcquire(lockKey, owner, leaseMillis);
+                    if (acquisition.acquired()) {
                         acquiredKeys.add(lockKey);
+                        acquiredLeases.add(new LockLease(lockKey, acquisition.fencingToken()));
                         if (config.isWatchdogEnabled()) {
-                            watchdogCoordinator.startRenew(lockKey, owner, leaseMillis);
+                            watchdogLeases.put(lockKey,
+                                    watchdogCoordinator.startRenew(lockKey, owner, leaseMillis));
                         }
                         acquiredThis = true;
                         break;
@@ -127,6 +148,8 @@ public class DefaultDistributedLocker implements DistributedLocker {
                             sortedKeys, acquiredKeys);
                     cleanupKeys(acquiredKeys, owner, config.isWatchdogEnabled());
                     acquiredKeys.clear();
+                    metrics.recordExecution(currentStrategy.name(), "timeout",
+                            System.nanoTime() - executionStartNanos, sortedKeys.size());
                     return LockOutcome.timeout(sortedKeys, waitTimeoutMillis);
                 }
             }
@@ -142,7 +165,23 @@ public class DefaultDistributedLocker implements DistributedLocker {
             for (String key : acquiredKeys) {
                 threadHeldKeys.add(strategyScopedKey(key));
             }
-            return LockOutcome.acquired(action.get());
+            Object result = action.apply(new LockHandle(owner, acquiredLeases));
+            WatchdogLease lostLease = watchdogLeases.values().stream()
+                    .filter(lease -> lease.state() == WatchdogLease.State.LOST)
+                    .findFirst()
+                    .orElse(null);
+            if (lostLease != null) {
+                throw new LockLostException(lostLease.lockKey(),
+                        "Lock ownership was lost during business execution for ["
+                                + lostLease.lockKey() + "]", lostLease.lastFailure());
+            }
+            metrics.recordExecution(currentStrategy.name(), "acquired",
+                    System.nanoTime() - executionStartNanos, sortedKeys.size());
+            return LockOutcome.acquired(result);
+        } catch (RuntimeException | Error failure) {
+            metrics.recordExecution(currentStrategy.name(), "error",
+                    System.nanoTime() - executionStartNanos, sortedKeys.size());
+            throw failure;
         } finally {
             for (String key : acquiredKeys) {
                 threadHeldKeys.remove(strategyScopedKey(key));

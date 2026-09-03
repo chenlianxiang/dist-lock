@@ -1,15 +1,20 @@
 package com.distlock.provider.redis;
 
+import com.distlock.core.spi.LockAcquisition;
 import com.distlock.core.spi.LockStorageProvider;
 import com.distlock.core.exception.LockStorageException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 
-import java.time.Duration;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.Objects;
 
 /**
@@ -23,6 +28,15 @@ public class RedisLockStorageProvider implements LockStorageProvider {
     private static final Logger log = LoggerFactory.getLogger(RedisLockStorageProvider.class);
 
     private final StringRedisTemplate redisTemplate;
+
+    private static final RedisScript<Long> ACQUIRE_SCRIPT = new DefaultRedisScript<>(
+            "if redis.call('exists', KEYS[1]) == 0 then " +
+                    "local token = redis.call('incr', KEYS[2]); " +
+                    "redis.call('psetex', KEYS[1], ARGV[2], ARGV[1]); " +
+                    "return token; " +
+                    "else return 0; end",
+            Long.class
+    );
 
     // 原子释放锁 Lua 脚本
     private static final RedisScript<Long> RELEASE_SCRIPT = new DefaultRedisScript<>(
@@ -49,17 +63,20 @@ public class RedisLockStorageProvider implements LockStorageProvider {
     }
 
     @Override
-    public boolean tryAcquire(String lockKey, String owner, long leaseMillis) {
+    public LockAcquisition tryAcquire(String lockKey, String owner, long leaseMillis) {
         Objects.requireNonNull(lockKey, "lockKey must not be null");
         Objects.requireNonNull(owner, "owner must not be null");
 
         try {
-            Boolean success = redisTemplate.opsForValue().setIfAbsent(
-                    lockKey,
+            Long token = redisTemplate.execute(
+                    ACQUIRE_SCRIPT,
+                    java.util.List.of(redisKey(lockKey, "lease"), redisKey(lockKey, "fence")),
                     owner,
-                    Duration.ofMillis(leaseMillis)
+                    String.valueOf(leaseMillis)
             );
-            return Boolean.TRUE.equals(success);
+            return token != null && token > 0
+                    ? LockAcquisition.acquired(token)
+                    : LockAcquisition.contended();
         } catch (RuntimeException t) {
             log.error("Redis error while acquiring lock [{}] for owner [{}]", lockKey, owner, t);
             throw new LockStorageException("acquire", lockKey, t);
@@ -74,7 +91,7 @@ public class RedisLockStorageProvider implements LockStorageProvider {
         try {
             Long result = redisTemplate.execute(
                     RELEASE_SCRIPT,
-                    Collections.singletonList(lockKey),
+                    Collections.singletonList(redisKey(lockKey, "lease")),
                     owner
             );
             return result != null && result > 0;
@@ -92,7 +109,7 @@ public class RedisLockStorageProvider implements LockStorageProvider {
         try {
             Long result = redisTemplate.execute(
                     RENEW_SCRIPT,
-                    Collections.singletonList(lockKey),
+                    Collections.singletonList(redisKey(lockKey, "lease")),
                     owner,
                     String.valueOf(leaseMillis)
             );
@@ -106,5 +123,27 @@ public class RedisLockStorageProvider implements LockStorageProvider {
     @Override
     public long getStorageTimeMillis() {
         return System.currentTimeMillis();
+    }
+
+    @Override
+    public void validateConnectivity() {
+        try {
+            String pong = redisTemplate.execute((RedisCallback<String>) connection -> connection.ping());
+            if (pong == null || !"PONG".equalsIgnoreCase(pong)) {
+                throw new IllegalStateException("Redis PING returned [" + pong + "]");
+            }
+        } catch (RuntimeException exception) {
+            throw new LockStorageException("health", "<redis>", exception);
+        }
+    }
+
+    private static String redisKey(String lockKey, String suffix) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(lockKey.getBytes(StandardCharsets.UTF_8));
+            return "dist-lock:{" + HexFormat.of().formatHex(digest) + "}:" + suffix;
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is not available", exception);
+        }
     }
 }

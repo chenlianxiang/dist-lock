@@ -3,6 +3,9 @@ package com.distlock.spring.boot.autoconfigure;
 import com.distlock.core.api.DistributedLocker;
 import com.distlock.core.api.LockStrategy;
 import com.distlock.core.spi.LockStorageProvider;
+import com.distlock.core.metrics.LockMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.springframework.boot.actuate.health.HealthIndicator;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
@@ -21,6 +24,7 @@ class DistributedLockAutoConfigurationTest {
                     DataSourceAutoConfiguration.class,
                     DistributedLockAutoConfiguration.class
             ))
+            .withBean(SimpleMeterRegistry.class, SimpleMeterRegistry::new)
             .withPropertyValues(
                     "spring.datasource.url=jdbc:h2:mem:starter_test;DB_CLOSE_DELAY=-1;MODE=MySQL",
                     "spring.datasource.driver-class-name=org.h2.Driver",
@@ -36,6 +40,8 @@ class DistributedLockAutoConfigurationTest {
             assertThat(context).hasBean("databaseLockStorageProvider");
             assertThat(context).hasBean("dbLocker");
             assertThat(context).hasBean("distributedLocker");
+            assertThat(context).hasSingleBean(LockMetrics.class);
+            assertThat(context).hasBean("distributedLockHealthIndicator");
 
             DistributedLocker primaryLocker = context.getBean(DistributedLocker.class);
             assertThat(primaryLocker).isNotNull();
@@ -49,6 +55,8 @@ class DistributedLockAutoConfigurationTest {
             DistributedLockProperties props = context.getBean(DistributedLockProperties.class);
             assertThat(props.getDefaultWaitTimeout()).isEqualTo(5000);
             assertThat(props.getDefaultLeaseTime()).isEqualTo(20000);
+            HealthIndicator health = context.getBean("distributedLockHealthIndicator", HealthIndicator.class);
+            assertThat(health.health().getStatus().getCode()).isEqualTo("UP");
         });
     }
 }
