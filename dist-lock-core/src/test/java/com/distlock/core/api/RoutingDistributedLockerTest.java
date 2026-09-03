@@ -1,70 +1,64 @@
 package com.distlock.core.api;
 
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.util.HashMap;
+import java.util.Collection;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.*;
 
-@ExtendWith(MockitoExtension.class)
 class RoutingDistributedLockerTest {
 
-    @Mock
-    private DistributedLocker dbLocker;
-
-    @Mock
-    private DistributedLocker redisLocker;
-
-    static class Order {
-        private final String id;
-        public Order(String id) { this.id = id; }
-        public String getId() { return id; }
-    }
-
     @Test
-    @DisplayName("路由分发测试：默认走 DATABASE，自主 use(REDIS) 走 REDIS")
-    void testRoutingDispatch() {
-        Map<String, DistributedLocker> map = new HashMap<>();
-        map.put("DATABASE", dbLocker);
-        map.put("REDIS", redisLocker);
-
-        RoutingDistributedLocker router = new RoutingDistributedLocker(map, "DATABASE");
-
-        Order order = new Order("ORD-001");
-        Function<Order, String> action = o -> "RESULT";
-
-        // 1. 默认调用 lock 走 DATABASE
-        router.lock(order, Order::getId, action);
-        verify(dbLocker).lock(eq(order), any(), eq(action));
-        verifyNoInteractions(redisLocker);
-
-        // 2. 自主选择 use(LockStrategy.REDIS)
-        DistributedLocker chosenRedis = router.use(LockStrategy.REDIS);
-        assertThat(chosenRedis).isSameAs(redisLocker);
-
-        // 3. 动态扩展未支持的策略抛出友好异常
-        assertThatThrownBy(() -> router.use(LockStrategy.of("ETCD")))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Unsupported lock strategy [ETCD]");
-    }
-
-    @Test
-    @DisplayName("默认策略未注册时必须快速失败，不允许随机回退")
-    void testMissingDefaultStrategyFailsFast() {
+    void routesDefaultAndExplicitStrategiesAtExecutionTime() {
+        RecordingLocker database = new RecordingLocker();
+        RecordingLocker redis = new RecordingLocker();
         RoutingDistributedLocker router = new RoutingDistributedLocker(
-                Map.of("DATABASE", dbLocker), "REDIS");
+                Map.of("DATABASE", database, "REDIS", redis), "DATABASE");
 
-        Order order = new Order("ORD-002");
-        assertThatThrownBy(() -> router.lock(order, Order::getId, o -> "RESULT"))
+        String defaultResult = router.lock("order", "1").call(() -> "DB");
+        String redisResult = router.lock("order", "2")
+                .strategy(LockStrategy.REDIS)
+                .call(() -> "REDIS");
+
+        assertThat(defaultResult).isEqualTo("DB");
+        assertThat(redisResult).isEqualTo("REDIS");
+        assertThat(database.executions).hasValue(1);
+        assertThat(redis.executions).hasValue(1);
+    }
+
+    @Test
+    void missingDefaultStrategyFailsFast() {
+        RoutingDistributedLocker router = new RoutingDistributedLocker(
+                Map.of("DATABASE", new RecordingLocker()), "REDIS");
+
+        assertThatThrownBy(() -> router.lock("order", "2").call(() -> "RESULT"))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Default lock strategy [REDIS] is not available");
+                .hasMessageContaining("Lock strategy [REDIS] is not available");
+    }
+
+    private static final class RecordingLocker implements DistributedLocker {
+        private final AtomicInteger executions = new AtomicInteger();
+
+        @Override
+        public LockOperation lock(String namespace, Object key) {
+            return LockOperation.single(namespace, key, (snapshot, action) -> {
+                executions.incrementAndGet();
+                return LockOutcome.acquired(action.get());
+            });
+        }
+
+        @Override
+        public <T> LockOperation locks(String namespace,
+                                       Collection<T> resources,
+                                       Function<T, ?> keyExtractor) {
+            return LockOperation.batch(namespace, resources, keyExtractor, (snapshot, action) -> {
+                executions.incrementAndGet();
+                return LockOutcome.acquired(action.get());
+            });
+        }
     }
 }

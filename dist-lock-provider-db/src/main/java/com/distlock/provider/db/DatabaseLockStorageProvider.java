@@ -1,10 +1,9 @@
 package com.distlock.provider.db;
 
 import com.distlock.core.spi.LockStorageProvider;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.dao.DataIntegrityViolationException;
+import com.distlock.core.exception.LockStorageException;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
@@ -21,8 +20,6 @@ import java.util.Objects;
  * 4. 自动处理初次建行与过期记录的抢占。
  */
 public class DatabaseLockStorageProvider implements LockStorageProvider {
-
-    private static final Logger log = LoggerFactory.getLogger(DatabaseLockStorageProvider.class);
 
     private final JdbcTemplate jdbcTemplate;
 
@@ -57,23 +54,26 @@ public class DatabaseLockStorageProvider implements LockStorageProvider {
         long expireAt = now + leaseMillis;
 
         // 1. 先尝试通过 CAS UPDATE 抢占过期租约（适用于表中已有记录的热锁场景）
-        int updated = jdbcTemplate.update(SQL_CAS_UPDATE, owner, expireAt, lockKey, now);
-        if (updated > 0) {
-            return true;
-        }
-
-        // 2. 若更新行数为 0，可能是该 lock_key 首次出现，尚未入库，尝试原子插入
         try {
+            int updated = jdbcTemplate.update(SQL_CAS_UPDATE, owner, expireAt, lockKey, now);
+            if (updated > 0) {
+                return true;
+            }
+
+            // 2. 若更新行数为 0，可能是该 lock_key 首次出现，尚未入库，尝试原子插入
             int inserted = jdbcTemplate.update(SQL_INSERT, lockKey, owner, expireAt);
             if (inserted > 0) {
                 return true;
             }
-        } catch (DataIntegrityViolationException ex) {
+        } catch (DuplicateKeyException ex) {
             // 3. 并发争抢时主键冲突说明其他节点已插入该 key，立即重试一次 CAS UPDATE
-            updated = jdbcTemplate.update(SQL_CAS_UPDATE, owner, expireAt, lockKey, now);
-            return updated > 0;
-        } catch (Exception ex) {
-            log.warn("Unexpected exception during insert lock [{}]", lockKey, ex);
+            try {
+                return jdbcTemplate.update(SQL_CAS_UPDATE, owner, expireAt, lockKey, now) > 0;
+            } catch (DataAccessException retryFailure) {
+                throw new LockStorageException("acquire", lockKey, retryFailure);
+            }
+        } catch (DataAccessException ex) {
+            throw new LockStorageException("acquire", lockKey, ex);
         }
 
         return false;
@@ -81,8 +81,11 @@ public class DatabaseLockStorageProvider implements LockStorageProvider {
 
     @Override
     public boolean release(String lockKey, String owner) {
-        int updated = jdbcTemplate.update(SQL_RELEASE, lockKey, owner);
-        return updated > 0;
+        try {
+            return jdbcTemplate.update(SQL_RELEASE, lockKey, owner) > 0;
+        } catch (DataAccessException ex) {
+            throw new LockStorageException("release", lockKey, ex);
+        }
     }
 
     @Override
@@ -90,8 +93,11 @@ public class DatabaseLockStorageProvider implements LockStorageProvider {
         long now = getStorageTimeMillis();
         long newExpireAt = now + leaseMillis;
 
-        int updated = jdbcTemplate.update(SQL_RENEW, newExpireAt, lockKey, owner, now);
-        return updated > 0;
+        try {
+            return jdbcTemplate.update(SQL_RENEW, newExpireAt, lockKey, owner, now) > 0;
+        } catch (DataAccessException ex) {
+            throw new LockStorageException("renew", lockKey, ex);
+        }
     }
 
     @Override
@@ -101,9 +107,10 @@ public class DatabaseLockStorageProvider implements LockStorageProvider {
             if (ts != null) {
                 return ts.getTime();
             }
-        } catch (Exception e) {
-            log.debug("Failed to fetch database timestamp, fallback to System.currentTimeMillis()", e);
+        } catch (DataAccessException e) {
+            throw new LockStorageException("time", "<storage-clock>", e);
         }
-        return System.currentTimeMillis();
+        throw new LockStorageException("time", "<storage-clock>",
+                new IllegalStateException("Database returned a null timestamp"));
     }
 }
