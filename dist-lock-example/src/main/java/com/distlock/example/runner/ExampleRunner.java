@@ -73,10 +73,12 @@ public class ExampleRunner implements CommandLineRunner {
         String customExConclusion = accountService.deductWithCustomException(account, new BigDecimal("100.00"));
         log.info(">>> 案例 4 结论: {}\n", customExConclusion);
 
-        // --- 场景 5：自主选择锁策略 (动态切换 use(LockStrategy)) ---
-        log.info("[案例 5]：自主选择锁策略 -> locker.use(LockStrategy.DATABASE)");
+        // --- 场景 5：在单次链式配置中选择锁策略 ---
+        log.info("[案例 5]：通过链式配置自主选择 DATABASE 策略");
         OrderDTO vipOrder = new OrderDTO("ORD-VIP-001", "U_999", new BigDecimal("8888.00"));
-        String vipResult = locker.use(LockStrategy.DATABASE).lock(vipOrder, OrderDTO::getOrderId, o -> "VIP_ORDER_PAID_" + o.getOrderId());
+        String vipResult = locker.lock("vip-order-payment", vipOrder.getOrderId())
+                .strategy(LockStrategy.DATABASE)
+                .call(() -> "VIP_ORDER_PAID_" + vipOrder.getOrderId());
         log.info(">>> 案例 5 结论 (自主指定 DATABASE 策略): {}\n", vipResult);
 
         log.info("=================================================================");

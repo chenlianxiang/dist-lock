@@ -36,9 +36,10 @@ class DistributedLockAutoConfigurationTest {
             DistributedLocker primaryLocker = context.getBean(DistributedLocker.class);
             assertThat(primaryLocker).isNotNull();
 
-            // 验证支持 use 策略
-            DistributedLocker dbLocker = primaryLocker.use(LockStrategy.DATABASE);
-            assertThat(dbLocker).isNotNull();
+            // 验证链式操作可以配置策略
+            var operation = primaryLocker.lock("starter-test", "1")
+                    .strategy(LockStrategy.DATABASE);
+            assertThat(operation).isNotNull();
 
             DistributedLockProperties props = context.getBean(DistributedLockProperties.class);
             assertThat(props.getDefaultWaitTimeout()).isEqualTo(5000);
