@@ -7,3 +7,9 @@ CREATE TABLE IF NOT EXISTS dist_lock (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (lock_key)
 );
+
+CREATE TABLE IF NOT EXISTS dist_lock_fence (
+  lock_key VARCHAR(255) NOT NULL,
+  fencing_token BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (lock_key)
+);
