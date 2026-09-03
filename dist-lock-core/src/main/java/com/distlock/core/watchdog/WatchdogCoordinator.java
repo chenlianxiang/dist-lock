@@ -41,7 +41,10 @@ public class WatchdogCoordinator {
      */
     public void startRenew(String lockKey, String owner, long leaseMillis) {
         String taskKey = buildTaskKey(lockKey, owner);
-        long period = Math.max(100, leaseMillis / 3);
+        if (leaseMillis <= 0) {
+            throw new IllegalArgumentException("leaseMillis must be greater than 0");
+        }
+        long period = Math.max(1, leaseMillis / 3);
 
         ScheduledFuture<?> future = scheduler.scheduleAtFixedRate(() -> {
             try {

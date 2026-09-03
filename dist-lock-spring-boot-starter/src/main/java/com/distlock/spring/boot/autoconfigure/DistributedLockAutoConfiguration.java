@@ -108,14 +108,7 @@ public class DistributedLockAutoConfiguration {
                 ? properties.getType().name()
                 : LockStrategy.DATABASE.name();
 
-        RoutingDistributedLocker router = new RoutingDistributedLocker(lockerMap, defaultStrategy);
-
-        // 为各个单独的 locker 注入反向路由能力（使得从任意 locker 也能调用 use 切换其他策略）
-        for (DefaultDistributedLocker locker : lockersProvider) {
-            locker.setStrategyRouter(router::use);
-        }
-
-        return router;
+        return new RoutingDistributedLocker(lockerMap, defaultStrategy);
     }
 
     private static LockConfig createConfig(DistributedLockProperties properties) {

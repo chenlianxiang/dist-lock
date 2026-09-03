@@ -1,6 +1,7 @@
 package com.distlock.provider.redis;
 
 import com.distlock.core.spi.LockStorageProvider;
+import com.distlock.core.exception.LockStorageException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -59,9 +60,9 @@ public class RedisLockStorageProvider implements LockStorageProvider {
                     Duration.ofMillis(leaseMillis)
             );
             return Boolean.TRUE.equals(success);
-        } catch (Throwable t) {
+        } catch (RuntimeException t) {
             log.error("Redis error while acquiring lock [{}] for owner [{}]", lockKey, owner, t);
-            return false;
+            throw new LockStorageException("acquire", lockKey, t);
         }
     }
 
@@ -77,9 +78,9 @@ public class RedisLockStorageProvider implements LockStorageProvider {
                     owner
             );
             return result != null && result > 0;
-        } catch (Throwable t) {
+        } catch (RuntimeException t) {
             log.error("Redis error while releasing lock [{}] for owner [{}]", lockKey, owner, t);
-            return false;
+            throw new LockStorageException("release", lockKey, t);
         }
     }
 
@@ -92,12 +93,13 @@ public class RedisLockStorageProvider implements LockStorageProvider {
             Long result = redisTemplate.execute(
                     RENEW_SCRIPT,
                     Collections.singletonList(lockKey),
+                    owner,
                     String.valueOf(leaseMillis)
             );
             return result != null && result > 0;
-        } catch (Throwable t) {
+        } catch (RuntimeException t) {
             log.error("Redis error while renewing lock [{}] for owner [{}]", lockKey, owner, t);
-            return false;
+            throw new LockStorageException("renew", lockKey, t);
         }
     }
 

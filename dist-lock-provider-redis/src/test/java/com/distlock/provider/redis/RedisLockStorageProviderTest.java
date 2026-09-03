@@ -1,5 +1,6 @@
 package com.distlock.provider.redis;
 
+import com.distlock.core.exception.LockStorageException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -14,6 +15,7 @@ import java.time.Duration;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -73,11 +75,22 @@ class RedisLockStorageProviderTest {
     @Test
     @DisplayName("Redis renew: 执行原子 Lua 脚本续期租约")
     void testRenewSuccess() {
-        when(redisTemplate.execute(any(RedisScript.class), anyList(), eq("30000")))
+        when(redisTemplate.execute(any(RedisScript.class), anyList(), eq("node-1"), eq("30000")))
                 .thenReturn(1L);
 
         boolean renewed = provider.renew("order:1001", "node-1", 30000);
 
         assertThat(renewed).isTrue();
+        verify(redisTemplate).execute(any(RedisScript.class), anyList(), eq("node-1"), eq("30000"));
+    }
+
+    @Test
+    @DisplayName("Redis 故障必须作为存储异常传播，不能伪装成锁竞争")
+    void testStorageFailureIsPropagated() {
+        when(redisTemplate.opsForValue()).thenThrow(new IllegalStateException("redis unavailable"));
+
+        assertThatThrownBy(() -> provider.tryAcquire("order:1001", "node-1", 30000))
+                .isInstanceOf(LockStorageException.class)
+                .hasMessageContaining("acquire");
     }
 }

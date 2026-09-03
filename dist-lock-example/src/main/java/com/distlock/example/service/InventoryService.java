@@ -31,8 +31,8 @@ public class InventoryService {
     public boolean deductBatch(List<OrderItemDTO> items) {
         log.info("准备批量锁定商品库存，商品项数: {}", items.size());
 
-        return locker.lock(items, OrderItemDTO::getSkuCode, list -> {
-            log.info("--> 批量获取锁成功！已锁定 SKU 列表: {}", list);
+        return locker.lock(items, OrderItemDTO::getSkuCode).call(() -> {
+            log.info("--> 批量获取锁成功！已锁定 SKU 列表: {}", items);
             try {
                 // 模拟批量扣减数据库库存
                 Thread.sleep(150);

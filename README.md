@@ -1,51 +1,122 @@
-# Distributed Lock 分布式锁通用组件
+# Distributed Lock 分布式锁组件
 
-本项目为多集群环境下的 Java 分布式锁通用组件，支持数据库 CAS 租约与 Redis 原子 Lua 脚本双存储底座，提供全限定类名防冲撞、集合升序防死锁、看门狗自动续期及开闭原则策略路由。
+面向 Java 17 与 Spring Boot 3 的可扩展分布式锁组件，当前提供数据库租约锁和 Redis 原子锁两种存储实现。
 
-完整技术原理、数学推导与架构规格请参阅：[设计与技术规格说明书 (document/DOCUMENTATION.md)](document/DOCUMENTATION.md)。
+项目采用“资源声明 → 链式配置 → 业务执行”三阶段 API。配置维度增加时只需扩展 `LockOperation`，不会产生组合式方法重载。
 
----
-
-## 模块结构
+## 模块
 
 ```text
-dist-lock/
-├── dist-lock-core                     # 核心抽象层：门面接口、策略模型、退避算法、看门狗引擎
-├── dist-lock-provider-db              # 关系型数据库存储实现：ANSI-SQL CAS 租约
-├── dist-lock-provider-redis           # Redis 存储实现：原子指令与 Lua 脚本
-├── dist-lock-spring-boot-starter      # Spring Boot 自动装配与路由容器装配
-└── dist-lock-example                  # 实战案例工程
+dist-lock-core                 核心 API、执行引擎、退避与看门狗
+dist-lock-provider-db          数据库 CAS 租约实现
+dist-lock-provider-redis       Redis SET NX PX 与 Lua 实现
+dist-lock-spring-boot-starter  Spring Boot 自动配置与策略路由
+dist-lock-example              可运行示例
 ```
 
----
+## API 模型
 
-## 核心设计规格
+### 1. 声明资源
 
-1. **统一门面交互**：
-   * 入口为 `locker.lock(...)`，单对象与集合批量共享统一执行引擎；
-   * 加锁与业务执行同步完成，直接返回业务结果。
-2. **多底座混合路由**：
-   * 采用 `LockStrategy` 策略接口，默认路由至关系型数据库（`DATABASE`）；
-   * 高频业务通过 `locker.use(LockStrategy.REDIS)` 切换至 Redis；
-   * 遵循开闭原则，扩展新底座无需修改核心接口。
-3. **全限定类名隔离**：
-   * 锁键格式为 `<Package.ClassName>:<BusinessKey>`，自动剥离动态代理后缀；
-   * 依靠 JVM 类命名规则消除不同业务实体的主键冲突。
-4. **集合排序防死锁**：
-   * 批量加锁前执行键去重与字典序升序排列，破坏环路等待条件；
-   * 遇到获取失败时按逆序释放已持有锁。
-5. **数据库连接保护与时钟统一**：
-   * 采用单条 CAS `UPDATE` 语句更新租约，单次交互完成后即归还连接池；
-   * 依据数据库服务端时间戳 (`SELECT CURRENT_TIMESTAMP`) 计算租约截止时间，消除服务器时钟漂移。
-6. **多维度降级处理**：
-   * 默认固定异常提示：`系统繁忙，当前业务正在处理中，请稍候重试`；
-   * 支持传入自定义提示文本、自定义业务异常工厂（`Supplier`）及函数式返回值降级（`fallback`）。
+```java
+LockOperation operation = locker.lock(
+    order,
+    OrderDTO::getOrderId
+);
+```
 
----
+批量资源：
 
-## 快速开始
+```java
+LockOperation operation = locker.lock(
+    items,
+    OrderItemDTO::getSkuCode
+);
+```
 
-### 1. Maven 依赖
+namespace 默认从资源对象的稳定用户类推导，业务方无需重复传入 `OrderDTO.class`。
+需要区分同一实体上的多个独立锁域时，才通过 `.scope(OrderPaymentLock.class)` 使用专用空标记类。
+
+最终锁键包含 namespace 的全限定类名、提取结果的实际类型和规范化业务键：
+
+```text
+dist-lock:v1:<namespace-class-name>:<key-class-name>:<business-key>
+```
+
+因此，不同锁域使用相同业务 ID，或者 `Long(1)` 与字符串 `"1"`，都不会意外成为同一把锁。
+namespace 类的包名与类名属于持久协议，滚动发布期间不可随意重命名。
+
+### 2. 按需链式配置
+
+```java
+LockOperation operation = locker
+    .lock(order, OrderDTO::getOrderId)
+    .strategy(LockStrategy.DATABASE)
+    .waitTimeout(Duration.ofSeconds(3))
+    .leaseTime(Duration.ofSeconds(30))
+    .watchdog(true);
+```
+
+`LockOperation` 不可变。每个配置方法返回一个新对象，因此基础配置可以安全复用。
+
+未显式设置的属性使用 Spring Boot 全局默认值：
+
+```yaml
+dist-lock:
+  type: DATABASE
+  default-wait-timeout: 3000
+  default-lease-time: 30000
+  watchdog-enabled: true
+```
+
+### 3. 执行业务
+
+有返回值：
+
+```java
+OrderResult result = operation.call(() -> orderService.pay(order));
+```
+
+无返回值：
+
+```java
+operation.run(() -> orderService.cancel(order));
+```
+
+`call` 与 `run` 在锁竞争超时时抛出 `LockTimeoutException`。
+
+需要自定义异常或降级时使用 `tryCall`：
+
+```java
+OrderResult result = operation
+    .tryCall(() -> orderService.pay(order))
+    .orElseThrow(() -> new BusinessException("订单正在处理中"));
+```
+
+```java
+OrderResult result = operation
+    .tryCall(() -> orderService.pay(order))
+    .orElseGet(() -> OrderResult.busy(order));
+```
+
+`tryCall` 只把正常的锁竞争超时转换为 `LockOutcome.TIMEOUT`。存储故障、锁所有权丢失和业务异常不会被伪装成普通竞争失败。
+
+## 策略路由
+
+默认使用全局配置的存储策略；单次操作可以覆盖：
+
+```java
+boolean success = locker
+    .lock(stock, SkuStock::getSkuCode)
+    .strategy(LockStrategy.REDIS)
+    .call(() -> stockService.deduct(skuCode));
+```
+
+如果请求的策略没有装配，执行时立即失败，不会随机回退到其他存储。
+
+## Maven
+
+当前版本为开发快照。使用 Starter 时还需要显式引入所需 Provider。
 
 ```xml
 <dependency>
@@ -53,94 +124,38 @@ dist-lock/
     <artifactId>dist-lock-spring-boot-starter</artifactId>
     <version>1.0.0-SNAPSHOT</version>
 </dependency>
+
+<dependency>
+    <groupId>com.distlock</groupId>
+    <artifactId>dist-lock-provider-db</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+</dependency>
 ```
 
-### 2. 数据库 DDL (MySQL)
+Redis 模式将 Provider 替换为 `dist-lock-provider-redis`。
 
-```sql
-CREATE TABLE IF NOT EXISTS `dist_lock` (
-  `lock_key` VARCHAR(255) NOT NULL COMMENT '锁资源唯一标识(全限定类名:业务主键)',
-  `owner` VARCHAR(128) NOT NULL DEFAULT '' COMMENT '锁持有者唯一标识(Node:PID:ThreadId)',
-  `expire_time` BIGINT NOT NULL DEFAULT 0 COMMENT '绝对过期时间戳(毫秒)',
-  `version` BIGINT NOT NULL DEFAULT 0 COMMENT '乐观锁版本号',
-  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`lock_key`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='通用分布式锁租约表';
+## 数据库表
+
+MySQL DDL 位于：
+
+```text
+dist-lock-provider-db/src/main/resources/schema/schema-mysql.sql
 ```
 
----
-
-## 使用示例
-
-### 1. 常规业务（默认走数据库锁）
-
-```java
-@Autowired
-private DistributedLocker locker;
-
-// 加锁执行并直接返回业务结果
-OrderResult result = locker.lock(
-    order, 
-    OrderDTO::getOrderId, 
-    "当前订单正在支付中，请勿重复操作", 
-    o -> orderService.pay(o)
-);
-```
-
-### 2. 高频秒杀业务（自主选择 Redis 策略）
-
-```java
-boolean success = locker.use(LockStrategy.REDIS).lock(
-    seckillItem, 
-    SeckillDTO::getSkuCode, 
-    "商品正在抢购中，请稍后再试", 
-    item -> seckillService.deductStock(item)
-);
-```
-
-### 3. 抛出自定义业务异常
-
-```java
-OrderResult result = locker.lock(
-    order, 
-    OrderDTO::getOrderId, 
-    () -> new BusinessException(10001, "账户资金已锁定"), 
-    o -> orderService.pay(o)
-);
-```
-
-### 4. 函数式值降级
-
-```java
-OrderResult result = locker.lock(
-    order, 
-    OrderDTO::getOrderId, 
-    3, TimeUnit.SECONDS,
-    o -> orderService.pay(o),              // 正常执行
-    o -> OrderResult.busy(o)               // 超时降级
-);
-```
-
-### 5. 集合批量加锁（自动防死锁）
-
-```java
-boolean success = locker.lock(
-    items, 
-    OrderItemDTO::getSkuCode, 
-    "购物车部分商品结算冲突，请重试", 
-    list -> stockService.deductBatch(list)
-);
-```
-
----
-
-## 运行示例工程
+## 验证
 
 ```bash
-# 启动内置 H2 演示应用
-mvn spring-boot:run -pl dist-lock-example
-
-# 执行全模块自动化测试
-mvn clean test
+mvn --batch-mode --no-transfer-progress clean verify
 ```
+
+GitHub Actions 会在 `main`、`fix/**` 分支及 Pull Request 上自动执行验证。
+
+## 正确性边界
+
+- 同一线程嵌套获取相同策略和锁键会快速失败；当前版本不支持重入。
+- 批量锁键会去重并按完整键排序，消除循环等待。
+- 每次 acquisition 使用独立 owner token，释放和续期必须匹配本次 owner。
+- 看门狗只能降低租约意外过期概率，不能替代 fencing token。
+- 在支付、资金、库存等关键写入场景中，业务仍需保持幂等；fencing token 正在 Issue #1 中跟踪。
+
+更完整的原理与扩展说明见 [技术规格](document/DOCUMENTATION.md)。

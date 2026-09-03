@@ -1,58 +1,54 @@
 package com.distlock.core.api;
 
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.*;
 
-@ExtendWith(MockitoExtension.class)
 class RoutingDistributedLockerTest {
 
-    @Mock
-    private DistributedLocker dbLocker;
+    @Test
+    void routesDefaultAndExplicitStrategiesAtExecutionTime() {
+        RecordingLocker database = new RecordingLocker();
+        RecordingLocker redis = new RecordingLocker();
+        RoutingDistributedLocker router = new RoutingDistributedLocker(
+                Map.of("DATABASE", database, "REDIS", redis), "DATABASE");
 
-    @Mock
-    private DistributedLocker redisLocker;
+        String defaultResult = router.lock("1", Function.identity()).call(() -> "DB");
+        String redisResult = router.lock("2", Function.identity())
+                .strategy(LockStrategy.REDIS)
+                .call(() -> "REDIS");
 
-    static class Order {
-        private final String id;
-        public Order(String id) { this.id = id; }
-        public String getId() { return id; }
+        assertThat(defaultResult).isEqualTo("DB");
+        assertThat(redisResult).isEqualTo("REDIS");
+        assertThat(database.executions).hasValue(1);
+        assertThat(redis.executions).hasValue(1);
     }
 
     @Test
-    @DisplayName("路由分发测试：默认走 DATABASE，自主 use(REDIS) 走 REDIS")
-    void testRoutingDispatch() {
-        Map<String, DistributedLocker> map = new HashMap<>();
-        map.put("DATABASE", dbLocker);
-        map.put("REDIS", redisLocker);
+    void missingDefaultStrategyFailsFast() {
+        RoutingDistributedLocker router = new RoutingDistributedLocker(
+                Map.of("DATABASE", new RecordingLocker()), "REDIS");
 
-        RoutingDistributedLocker router = new RoutingDistributedLocker(map, "DATABASE");
+        assertThatThrownBy(() -> router.lock("2", Function.identity()).call(() -> "RESULT"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Lock strategy [REDIS] is not available");
+    }
 
-        Order order = new Order("ORD-001");
-        Function<Order, String> action = o -> "RESULT";
+    private static final class RecordingLocker implements DistributedLocker {
+        private final AtomicInteger executions = new AtomicInteger();
 
-        // 1. 默认调用 lock 走 DATABASE
-        router.lock(order, Order::getId, action);
-        verify(dbLocker).lock(eq(order), any(), eq(action));
-        verifyNoInteractions(redisLocker);
-
-        // 2. 自主选择 use(LockStrategy.REDIS)
-        DistributedLocker chosenRedis = router.use(LockStrategy.REDIS);
-        assertThat(chosenRedis).isSameAs(redisLocker);
-
-        // 3. 动态扩展未支持的策略抛出友好异常
-        assertThatThrownBy(() -> router.use(LockStrategy.of("ETCD")))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Unsupported lock strategy [ETCD]");
+        @Override
+        public <T> LockOperation lock(Object resourceOrResources,
+                                      Function<T, ?> keyExtractor) {
+            return LockOperation.create(resourceOrResources, keyExtractor, (snapshot, action) -> {
+                executions.incrementAndGet();
+                return LockOutcome.acquired(action.get());
+            });
+        }
     }
 }

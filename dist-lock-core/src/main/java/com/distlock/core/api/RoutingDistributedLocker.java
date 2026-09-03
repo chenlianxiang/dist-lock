@@ -1,17 +1,15 @@
 package com.distlock.core.api;
 
-import java.util.*;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
- * 分布式锁多引擎动态路由器。
- * <p>
- * 支持同时注册 DB、Redis、Zookeeper 等多种底层锁实现，通过 {@link #use(LockStrategy)} 自主动态分发。
- * 未显式声明策略时，自动路由到默认底座（如大部分常规业务默认走 DATABASE）。
+ * 在链式配置执行时，根据 strategy 选择具体锁执行器。
  */
 public class RoutingDistributedLocker implements DistributedLocker {
 
@@ -20,186 +18,69 @@ public class RoutingDistributedLocker implements DistributedLocker {
 
     public RoutingDistributedLocker(Map<String, DistributedLocker> initialLockers, String defaultStrategyName) {
         if (initialLockers != null) {
-            initialLockers.forEach((k, v) -> this.lockers.put(k.toUpperCase(), v));
+            initialLockers.forEach((key, value) ->
+                    lockers.put(normalize(key), Objects.requireNonNull(value, "locker must not be null")));
         }
-        this.defaultStrategyName = (defaultStrategyName != null && !defaultStrategyName.isBlank())
-                ? defaultStrategyName.toUpperCase()
+        this.defaultStrategyName = defaultStrategyName != null && !defaultStrategyName.isBlank()
+                ? normalize(defaultStrategyName)
                 : LockStrategy.DATABASE.name();
     }
 
-    /**
-     * 注册新的锁策略引擎。
-     */
     public RoutingDistributedLocker register(LockStrategy strategy, DistributedLocker locker) {
         Objects.requireNonNull(strategy, "strategy must not be null");
-        Objects.requireNonNull(locker, "locker must not be null");
-        this.lockers.put(strategy.name().toUpperCase(), locker);
+        lockers.put(normalize(strategy.name()), Objects.requireNonNull(locker, "locker must not be null"));
         return this;
     }
 
     @Override
-    public DistributedLocker use(LockStrategy strategy) {
-        Objects.requireNonNull(strategy, "strategy must not be null");
-        String name = strategy.name().toUpperCase();
-        DistributedLocker target = lockers.get(name);
-        if (target == null) {
-            throw new IllegalArgumentException("Unsupported lock strategy [" + name + "], currently available strategies: " + lockers.keySet());
+    public <T> LockOperation lock(Object resourceOrResources,
+                                  Function<T, ?> keyExtractor) {
+        return LockOperation.create(resourceOrResources, keyExtractor, this::execute);
+    }
+
+    private LockOutcome<?> execute(LockOperation.Snapshot snapshot, Supplier<?> action) {
+        String strategyName = snapshot.strategy() == null
+                ? defaultStrategyName : normalize(snapshot.strategy().name());
+        DistributedLocker target = requireLocker(strategyName);
+
+        LockOperation operation = forward(target, snapshot);
+
+        if (snapshot.strategy() != null) {
+            operation = operation.strategy(snapshot.strategy());
         }
-        return target;
-    }
-
-    private DistributedLocker getDefaultLocker() {
-        DistributedLocker defaultLocker = lockers.get(defaultStrategyName);
-        if (defaultLocker == null) {
-            if (!lockers.isEmpty()) {
-                return lockers.values().iterator().next();
-            }
-            throw new IllegalStateException("No DistributedLocker instance available in RoutingDistributedLocker!");
+        if (snapshot.waitTimeoutMillis() != null) {
+            operation = operation.waitTimeout(Duration.ofMillis(snapshot.waitTimeoutMillis()));
         }
-        return defaultLocker;
+        if (snapshot.leaseMillis() != null) {
+            operation = operation.leaseTime(Duration.ofMillis(snapshot.leaseMillis()));
+        }
+        if (snapshot.watchdogEnabled() != null) {
+            operation = operation.watchdog(snapshot.watchdogEnabled());
+        }
+        return operation.tryCall(action);
     }
 
-    // =========================================================================
-    // 默认全量委托到 defaultLocker
-    // =========================================================================
-
-    @Override
-    public <T, R> R lock(T data, Function<T, ?> keyExtractor, Function<T, R> action) {
-        return getDefaultLocker().lock(data, keyExtractor, action);
+    private static LockOperation forward(DistributedLocker target, LockOperation.Snapshot snapshot) {
+        List<RoutedResource> resources = snapshot.businessKeys().stream()
+                .map(key -> new RoutedResource(snapshot.namespace(), key))
+                .toList();
+        return target.lock(resources, RoutedResource::key);
     }
 
-    @Override
-    public <T> void lock(T data, Function<T, ?> keyExtractor, Consumer<T> action) {
-        getDefaultLocker().lock(data, keyExtractor, action);
+    private record RoutedResource(Class<?> lockNamespace, Object key)
+            implements LockOperation.NamespaceCarrier {
     }
 
-    @Override
-    public <T, R> R lock(T data, Function<T, ?> keyExtractor, String errorMessage, Function<T, R> action) {
-        return getDefaultLocker().lock(data, keyExtractor, errorMessage, action);
+    private DistributedLocker requireLocker(String strategyName) {
+        DistributedLocker locker = lockers.get(strategyName);
+        if (locker == null) {
+            throw new IllegalStateException("Lock strategy [" + strategyName
+                    + "] is not available. Registered strategies: " + lockers.keySet());
+        }
+        return locker;
     }
 
-    @Override
-    public <T> void lock(T data, Function<T, ?> keyExtractor, String errorMessage, Consumer<T> action) {
-        getDefaultLocker().lock(data, keyExtractor, errorMessage, action);
-    }
-
-    @Override
-    public <T, R> R lock(T data, Function<T, ?> keyExtractor, Supplier<? extends RuntimeException> exceptionSupplier, Function<T, R> action) {
-        return getDefaultLocker().lock(data, keyExtractor, exceptionSupplier, action);
-    }
-
-    @Override
-    public <T> void lock(T data, Function<T, ?> keyExtractor, Supplier<? extends RuntimeException> exceptionSupplier, Consumer<T> action) {
-        getDefaultLocker().lock(data, keyExtractor, exceptionSupplier, action);
-    }
-
-    @Override
-    public <T, R> R lock(T data, Function<T, ?> keyExtractor, Function<T, R> action, Function<T, R> fallback) {
-        return getDefaultLocker().lock(data, keyExtractor, action, fallback);
-    }
-
-    @Override
-    public <T> void lock(T data, Function<T, ?> keyExtractor, Consumer<T> action, Consumer<T> fallback) {
-        getDefaultLocker().lock(data, keyExtractor, action, fallback);
-    }
-
-    @Override
-    public <T, R> R lock(T data, Function<T, ?> keyExtractor, long timeout, TimeUnit unit, String errorMessage, Function<T, R> action) {
-        return getDefaultLocker().lock(data, keyExtractor, timeout, unit, errorMessage, action);
-    }
-
-    @Override
-    public <T> void lock(T data, Function<T, ?> keyExtractor, long timeout, TimeUnit unit, String errorMessage, Consumer<T> action) {
-        getDefaultLocker().lock(data, keyExtractor, timeout, unit, errorMessage, action);
-    }
-
-    @Override
-    public <T, R> R lock(T data, Function<T, ?> keyExtractor, long timeout, TimeUnit unit, Supplier<? extends RuntimeException> exceptionSupplier, Function<T, R> action) {
-        return getDefaultLocker().lock(data, keyExtractor, timeout, unit, exceptionSupplier, action);
-    }
-
-    @Override
-    public <T> void lock(T data, Function<T, ?> keyExtractor, long timeout, TimeUnit unit, Supplier<? extends RuntimeException> exceptionSupplier, Consumer<T> action) {
-        getDefaultLocker().lock(data, keyExtractor, timeout, unit, exceptionSupplier, action);
-    }
-
-    @Override
-    public <T, R> R lock(T data, Function<T, ?> keyExtractor, long timeout, TimeUnit unit, Function<T, R> action, Function<T, R> fallback) {
-        return getDefaultLocker().lock(data, keyExtractor, timeout, unit, action, fallback);
-    }
-
-    @Override
-    public <T> void lock(T data, Function<T, ?> keyExtractor, long timeout, TimeUnit unit, Consumer<T> action, Consumer<T> fallback) {
-        getDefaultLocker().lock(data, keyExtractor, timeout, unit, action, fallback);
-    }
-
-    @Override
-    public <T, C extends Collection<T>, R> R lock(C dataList, Function<T, ?> keyExtractor, Function<C, R> action) {
-        return getDefaultLocker().lock(dataList, keyExtractor, action);
-    }
-
-    @Override
-    public <T, C extends Collection<T>> void lock(C dataList, Function<T, ?> keyExtractor, Consumer<C> action) {
-        getDefaultLocker().lock(dataList, keyExtractor, action);
-    }
-
-    @Override
-    public <T, C extends Collection<T>, R> R lock(C dataList, Function<T, ?> keyExtractor, String errorMessage, Function<C, R> action) {
-        return getDefaultLocker().lock(dataList, keyExtractor, errorMessage, action);
-    }
-
-    @Override
-    public <T, C extends Collection<T>> void lock(C dataList, Function<T, ?> keyExtractor, String errorMessage, Consumer<C> action) {
-        getDefaultLocker().lock(dataList, keyExtractor, errorMessage, action);
-    }
-
-    @Override
-    public <T, C extends Collection<T>, R> R lock(C dataList, Function<T, ?> keyExtractor, Supplier<? extends RuntimeException> exceptionSupplier, Function<C, R> action) {
-        return getDefaultLocker().lock(dataList, keyExtractor, exceptionSupplier, action);
-    }
-
-    @Override
-    public <T, C extends Collection<T>> void lock(C dataList, Function<T, ?> keyExtractor, Supplier<? extends RuntimeException> exceptionSupplier, Consumer<C> action) {
-        getDefaultLocker().lock(dataList, keyExtractor, exceptionSupplier, action);
-    }
-
-    @Override
-    public <T, C extends Collection<T>, R> R lock(C dataList, Function<T, ?> keyExtractor, Function<C, R> action, Function<C, R> fallback) {
-        return getDefaultLocker().lock(dataList, keyExtractor, action, fallback);
-    }
-
-    @Override
-    public <T, C extends Collection<T>> void lock(C dataList, Function<T, ?> keyExtractor, Consumer<C> action, Consumer<C> fallback) {
-        getDefaultLocker().lock(dataList, keyExtractor, action, fallback);
-    }
-
-    @Override
-    public <T, C extends Collection<T>, R> R lock(C dataList, Function<T, ?> keyExtractor, long timeout, TimeUnit unit, String errorMessage, Function<C, R> action) {
-        return getDefaultLocker().lock(dataList, keyExtractor, timeout, unit, errorMessage, action);
-    }
-
-    @Override
-    public <T, C extends Collection<T>> void lock(C dataList, Function<T, ?> keyExtractor, long timeout, TimeUnit unit, String errorMessage, Consumer<C> action) {
-        getDefaultLocker().lock(dataList, keyExtractor, timeout, unit, errorMessage, action);
-    }
-
-    @Override
-    public <T, C extends Collection<T>, R> R lock(C dataList, Function<T, ?> keyExtractor, long timeout, TimeUnit unit, Supplier<? extends RuntimeException> exceptionSupplier, Function<C, R> action) {
-        return getDefaultLocker().lock(dataList, keyExtractor, timeout, unit, exceptionSupplier, action);
-    }
-
-    @Override
-    public <T, C extends Collection<T>> void lock(C dataList, Function<T, ?> keyExtractor, long timeout, TimeUnit unit, Supplier<? extends RuntimeException> exceptionSupplier, Consumer<C> action) {
-        getDefaultLocker().lock(dataList, keyExtractor, timeout, unit, exceptionSupplier, action);
-    }
-
-    @Override
-    public <T, C extends Collection<T>, R> R lock(C dataList, Function<T, ?> keyExtractor, long timeout, TimeUnit unit, Function<C, R> action, Function<C, R> fallback) {
-        return getDefaultLocker().lock(dataList, keyExtractor, timeout, unit, action, fallback);
-    }
-
-    @Override
-    public <T, C extends Collection<T>> void lock(C dataList, Function<T, ?> keyExtractor, long timeout, TimeUnit unit, Consumer<C> action, Consumer<C> fallback) {
-        getDefaultLocker().lock(dataList, keyExtractor, timeout, unit, action, fallback);
+    private static String normalize(String strategyName) {
+        return strategyName.trim().toUpperCase(java.util.Locale.ROOT);
     }
 }

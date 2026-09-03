@@ -38,6 +38,15 @@ public final class LockOwner {
     }
 
     /**
+     * 为一次独立的加锁执行生成唯一持有令牌。
+     * <p>
+     * 令牌不能只绑定线程，否则同一线程的嵌套调用会共享 owner，内层释放时可能提前释放外层锁。
+     */
+    public static String newOwner() {
+        return currentOwner() + ":" + UUID.randomUUID();
+    }
+
+    /**
      * 判断某个 owner 字符串是否属于当前 JVM 实例。
      */
     public static boolean isCurrentNode(String owner) {
