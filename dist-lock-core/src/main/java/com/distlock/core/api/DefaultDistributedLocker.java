@@ -171,9 +171,11 @@ public class DefaultDistributedLocker implements DistributedLocker {
                     .findFirst()
                     .orElse(null);
             if (lostLease != null) {
+                String failureMessage = lostLease.lastFailureMessage();
                 throw new LockLostException(lostLease.lockKey(),
                         "Lock ownership was lost during business execution for ["
-                                + lostLease.lockKey() + "]", lostLease.lastFailure());
+                                + lostLease.lockKey() + "]"
+                                + (failureMessage == null ? "" : "; " + failureMessage));
             }
             metrics.recordExecution(currentStrategy.name(), "acquired",
                     System.nanoTime() - executionStartNanos, sortedKeys.size());

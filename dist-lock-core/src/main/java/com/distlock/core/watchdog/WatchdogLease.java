@@ -15,7 +15,7 @@ public final class WatchdogLease {
     private final AtomicLong renewSuccesses = new AtomicLong();
     private final AtomicLong renewFailures = new AtomicLong();
     private final AtomicLong delayedRuns = new AtomicLong();
-    private volatile Throwable lastFailure;
+    private volatile String lastFailureMessage;
 
     WatchdogLease(String lockKey) {
         this.lockKey = lockKey;
@@ -26,28 +26,32 @@ public final class WatchdogLease {
     public long renewSuccesses() { return renewSuccesses.get(); }
     public long renewFailures() { return renewFailures.get(); }
     public long delayedRuns() { return delayedRuns.get(); }
-    public Throwable lastFailure() { return lastFailure; }
+    public String lastFailureMessage() { return lastFailureMessage; }
 
     void renewed() {
         renewSuccesses.incrementAndGet();
         state.compareAndSet(State.DEGRADED, State.ACTIVE);
-        lastFailure = null;
+        lastFailureMessage = null;
     }
 
     void failed(Throwable failure) {
         renewFailures.incrementAndGet();
-        lastFailure = failure;
+        lastFailureMessage = messageOf(failure);
         state.compareAndSet(State.ACTIVE, State.DEGRADED);
     }
 
     void delayed() { delayedRuns.incrementAndGet(); }
 
     void lost(Throwable failure) {
-        lastFailure = failure;
+        lastFailureMessage = messageOf(failure);
         state.set(State.LOST);
     }
 
     void stopped() {
         state.updateAndGet(current -> current == State.LOST ? current : State.STOPPED);
+    }
+
+    private String messageOf(Throwable failure) {
+        return failure == null ? null : failure.getMessage();
     }
 }

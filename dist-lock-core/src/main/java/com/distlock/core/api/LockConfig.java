@@ -5,7 +5,7 @@ import java.util.concurrent.TimeUnit;
 /**
  * 分布式锁运行时配置项。
  */
-public class LockConfig {
+public final class LockConfig {
 
     private final long waitTimeoutMillis;
     private final long leaseMillis;

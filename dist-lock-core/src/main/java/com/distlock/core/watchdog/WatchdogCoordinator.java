@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * 有界多线程看门狗，记录续期成功、延迟、失败与所有权丢失状态。
  */
-public class WatchdogCoordinator {
+public final class WatchdogCoordinator {
 
     private static final Logger log = LoggerFactory.getLogger(WatchdogCoordinator.class);
 
