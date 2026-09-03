@@ -55,4 +55,16 @@ class RoutingDistributedLockerTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Unsupported lock strategy [ETCD]");
     }
+
+    @Test
+    @DisplayName("默认策略未注册时必须快速失败，不允许随机回退")
+    void testMissingDefaultStrategyFailsFast() {
+        RoutingDistributedLocker router = new RoutingDistributedLocker(
+                Map.of("DATABASE", dbLocker), "REDIS");
+
+        Order order = new Order("ORD-002");
+        assertThatThrownBy(() -> router.lock(order, Order::getId, o -> "RESULT"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Default lock strategy [REDIS] is not available");
+    }
 }

@@ -28,7 +28,7 @@ public class DatabaseLockStorageProvider implements LockStorageProvider {
 
     private static final String SQL_CAS_UPDATE =
             "UPDATE dist_lock SET owner = ?, expire_time = ?, version = version + 1 " +
-            "WHERE lock_key = ? AND (expire_time < ? OR owner = ?)";
+            "WHERE lock_key = ? AND expire_time < ?";
 
     private static final String SQL_INSERT =
             "INSERT INTO dist_lock (lock_key, owner, expire_time, version) VALUES (?, ?, ?, 1)";
@@ -56,8 +56,8 @@ public class DatabaseLockStorageProvider implements LockStorageProvider {
         long now = getStorageTimeMillis();
         long expireAt = now + leaseMillis;
 
-        // 1. 先尝试通过 CAS UPDATE 抢占或重入（适用于表中已有记录的热锁场景）
-        int updated = jdbcTemplate.update(SQL_CAS_UPDATE, owner, expireAt, lockKey, now, owner);
+        // 1. 先尝试通过 CAS UPDATE 抢占过期租约（适用于表中已有记录的热锁场景）
+        int updated = jdbcTemplate.update(SQL_CAS_UPDATE, owner, expireAt, lockKey, now);
         if (updated > 0) {
             return true;
         }
@@ -70,7 +70,7 @@ public class DatabaseLockStorageProvider implements LockStorageProvider {
             }
         } catch (DataIntegrityViolationException ex) {
             // 3. 并发争抢时主键冲突说明其他节点已插入该 key，立即重试一次 CAS UPDATE
-            updated = jdbcTemplate.update(SQL_CAS_UPDATE, owner, expireAt, lockKey, now, owner);
+            updated = jdbcTemplate.update(SQL_CAS_UPDATE, owner, expireAt, lockKey, now);
             return updated > 0;
         } catch (Exception ex) {
             log.warn("Unexpected exception during insert lock [{}]", lockKey, ex);

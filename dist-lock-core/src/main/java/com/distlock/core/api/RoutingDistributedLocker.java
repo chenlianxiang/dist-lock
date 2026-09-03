@@ -51,10 +51,8 @@ public class RoutingDistributedLocker implements DistributedLocker {
     private DistributedLocker getDefaultLocker() {
         DistributedLocker defaultLocker = lockers.get(defaultStrategyName);
         if (defaultLocker == null) {
-            if (!lockers.isEmpty()) {
-                return lockers.values().iterator().next();
-            }
-            throw new IllegalStateException("No DistributedLocker instance available in RoutingDistributedLocker!");
+            throw new IllegalStateException("Default lock strategy [" + defaultStrategyName
+                    + "] is not available. Registered strategies: " + lockers.keySet());
         }
         return defaultLocker;
     }

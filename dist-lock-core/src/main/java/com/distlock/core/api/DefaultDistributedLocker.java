@@ -29,6 +29,7 @@ public class DefaultDistributedLocker implements DistributedLocker {
     private final LockConfig defaultConfig;
     private final LockStrategy currentStrategy;
     private Function<LockStrategy, DistributedLocker> strategyRouter;
+    private static final ThreadLocal<Set<String>> HELD_LOCK_KEYS = ThreadLocal.withInitial(HashSet::new);
 
     public DefaultDistributedLocker(LockStorageProvider storageProvider) {
         this(storageProvider, LockStrategy.DATABASE);
@@ -362,28 +363,32 @@ public class DefaultDistributedLocker implements DistributedLocker {
             return action.apply(collection);
         }
 
-        T firstItem = collection.iterator().next();
-        String namespace = resolveNamespace(firstItem);
-
-        // 1. 提取所有 Key、去重并严格自然升序排序（消除分布式死锁）
+        // 1. 每个对象独立生成完整 Key，严格校验后去重并排序（消除分布式死锁）
         List<String> sortedKeys = collection.stream()
-                .filter(Objects::nonNull)
-                .map(keyExtractor)
-                .filter(Objects::nonNull)
-                .map(Object::toString)
+                .map(item -> buildLockKey(item, keyExtractor))
                 .distinct()
                 .sorted()
-                .map(k -> namespace + ":" + k)
                 .toList();
 
         if (sortedKeys.isEmpty()) {
             throw new IllegalArgumentException("Extracted lock keys must not be empty for: " + collection);
         }
 
-        String owner = LockOwner.currentOwner();
+        Set<String> threadHeldKeys = HELD_LOCK_KEYS.get();
+        List<String> reentrantKeys = sortedKeys.stream()
+                .map(this::strategyScopedKey)
+                .filter(threadHeldKeys::contains)
+                .toList();
+        if (!reentrantKeys.isEmpty()) {
+            throw new LockAcquisitionException(reentrantKeys.get(0),
+                    "Reentrant locking is not supported for keys " + reentrantKeys);
+        }
+
+        String owner = LockOwner.newOwner();
         long waitTimeoutMillis = config.getWaitTimeoutMillis();
         long leaseMillis = config.getLeaseMillis();
-        long deadline = System.currentTimeMillis() + waitTimeoutMillis;
+        long waitBudgetNanos = TimeUnit.MILLISECONDS.toNanos(waitTimeoutMillis);
+        long waitStartNanos = System.nanoTime();
         List<String> acquiredKeys = new ArrayList<>(sortedKeys.size());
         AdaptiveBackoff backoff = new AdaptiveBackoff();
         boolean allAcquired = true;
@@ -397,15 +402,20 @@ public class DefaultDistributedLocker implements DistributedLocker {
                     acquiredThis = storageProvider.tryAcquire(lockKey, owner, leaseMillis);
                     if (acquiredThis) {
                         acquiredKeys.add(lockKey);
+                        if (config.isWatchdogEnabled()) {
+                            watchdogCoordinator.startRenew(lockKey, owner, leaseMillis);
+                        }
                         break;
                     }
-                    long remaining = deadline - System.currentTimeMillis();
-                    if (remaining <= 0) {
+                    long elapsedNanos = System.nanoTime() - waitStartNanos;
+                    long remainingNanos = waitBudgetNanos - elapsedNanos;
+                    if (remainingNanos <= 0) {
                         allAcquired = false;
                         break;
                     }
                     try {
-                        backoff.backoff(remaining);
+                        long remainingMillis = Math.max(1, TimeUnit.NANOSECONDS.toMillis(remainingNanos));
+                        backoff.backoff(remainingMillis);
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                         throw new LockAcquisitionException(lockKey, "Interrupted while waiting for lock [" + lockKey + "]", e);
@@ -420,31 +430,65 @@ public class DefaultDistributedLocker implements DistributedLocker {
 
             if (!allAcquired) {
                 log.warn("Failed to acquire all locks for keys [{}], rolling back acquired [{}]", sortedKeys, acquiredKeys);
-                rollbackKeys(acquiredKeys, owner);
+                cleanupKeys(acquiredKeys, owner, config.isWatchdogEnabled());
                 acquiredKeys.clear();
 
                 // 统一交由 failureHandler 处理（抛出默认友好异常、特制异常、特制文案或函数式兜底）
                 return failureHandler.handle(collection, "lock[" + sortedKeys + "]", waitTimeoutMillis);
             }
 
-            if (config.isWatchdogEnabled()) {
-                for (String key : acquiredKeys) {
-                    watchdogCoordinator.startRenew(key, owner, leaseMillis);
+            // 批量获取可能耗时较长，执行业务前原子续期一次，同时确认所有权仍然有效。
+            for (String key : acquiredKeys) {
+                if (!storageProvider.renew(key, owner, leaseMillis)) {
+                    throw new LockAcquisitionException(key,
+                            "Lock ownership was lost before business execution for [" + key + "]");
                 }
             }
 
+            for (String key : acquiredKeys) {
+                threadHeldKeys.add(strategyScopedKey(key));
+            }
             return action.apply(collection);
 
         } finally {
+            for (String key : acquiredKeys) {
+                threadHeldKeys.remove(strategyScopedKey(key));
+            }
+            if (threadHeldKeys.isEmpty()) {
+                HELD_LOCK_KEYS.remove();
+            }
             if (!acquiredKeys.isEmpty()) {
-                if (config.isWatchdogEnabled()) {
-                    for (String key : acquiredKeys) {
-                        watchdogCoordinator.stopRenew(key, owner);
-                    }
-                }
-                rollbackKeys(acquiredKeys, owner);
+                cleanupKeys(acquiredKeys, owner, config.isWatchdogEnabled());
             }
         }
+    }
+
+    private <T> String buildLockKey(T item, Function<T, ?> keyExtractor) {
+        if (item == null) {
+            throw new IllegalArgumentException("Lock collection must not contain null elements");
+        }
+        Object extractedKey = keyExtractor.apply(item);
+        if (extractedKey == null) {
+            throw new IllegalArgumentException("Extracted lock key must not be null for " + item.getClass().getName());
+        }
+        String businessKey = extractedKey.toString();
+        if (businessKey.isBlank()) {
+            throw new IllegalArgumentException("Extracted lock key must not be blank for " + item.getClass().getName());
+        }
+        return resolveNamespace(item) + ":" + businessKey;
+    }
+
+    private String strategyScopedKey(String lockKey) {
+        return currentStrategy.name().toUpperCase(Locale.ROOT) + "|" + lockKey;
+    }
+
+    private void cleanupKeys(List<String> keys, String owner, boolean watchdogEnabled) {
+        if (watchdogEnabled) {
+            for (String key : keys) {
+                watchdogCoordinator.stopRenew(key, owner);
+            }
+        }
+        rollbackKeys(keys, owner);
     }
 
     private void rollbackKeys(List<String> keys, String owner) {

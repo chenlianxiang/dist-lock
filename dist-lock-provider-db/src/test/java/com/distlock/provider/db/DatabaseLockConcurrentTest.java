@@ -274,4 +274,14 @@ class DatabaseLockConcurrentTest {
 
         storageProvider.release(occupiedKey, "external-holder");
     }
+
+    @Test
+    @DisplayName("数据库锁不允许仅凭相同 owner 重入，避免内层提前释放外层锁")
+    void testSameOwnerCannotReenter() {
+        String lockKey = Order.class.getName() + ":ORD-REENTRANT";
+
+        assertThat(storageProvider.tryAcquire(lockKey, "same-owner", 5000)).isTrue();
+        assertThat(storageProvider.tryAcquire(lockKey, "same-owner", 5000)).isFalse();
+        assertThat(storageProvider.release(lockKey, "same-owner")).isTrue();
+    }
 }

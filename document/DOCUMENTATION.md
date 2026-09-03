@@ -138,9 +138,9 @@ SET owner = :newOwner,
     expire_time = :newExpireTime, 
     version = version + 1 
 WHERE lock_key = :lockKey 
-  AND (expire_time < :currentTime OR owner = :newOwner)
+  AND expire_time < :currentTime
 ```
-* **更新行数为 1**：成功占有或重入；
+* **更新行数为 1**：成功占有已过期租约；
 * **更新行数为 0**：当前被其他节点有效持有，更新失败；
 * **若记录不存在**：执行 `INSERT INTO dist_lock ...`，依赖主键唯一约束保证原子性。唯一键冲突异常（`DataIntegrityViolationException`）被静默捕获，判定为争抢未命中。
 
@@ -194,8 +194,9 @@ Redis 存储实现采用原生原子命令结合 Lua 脚本：
 
 $$T_{\text{sleep}} = \text{random}(0, \min(T_{\text{max}}, T_{\text{base}} \times 2^{\text{attempt}}))$$
 
-* $T_{\text{base}} = 10\text{ ms}$
-* $T_{\text{max}} = 200\text{ ms}$
+* $T_{\text{base}} = 20\text{ ms}$
+* $T_{\text{max}} = 300\text{ ms}$
+* 基础延时倍率为 $1.5$，并施加 $\pm 50\%$ 随机抖动。
 
 ---
 

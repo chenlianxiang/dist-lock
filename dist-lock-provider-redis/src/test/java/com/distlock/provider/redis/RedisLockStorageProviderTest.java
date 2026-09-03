@@ -73,11 +73,12 @@ class RedisLockStorageProviderTest {
     @Test
     @DisplayName("Redis renew: 执行原子 Lua 脚本续期租约")
     void testRenewSuccess() {
-        when(redisTemplate.execute(any(RedisScript.class), anyList(), eq("30000")))
+        when(redisTemplate.execute(any(RedisScript.class), anyList(), eq("node-1"), eq("30000")))
                 .thenReturn(1L);
 
         boolean renewed = provider.renew("order:1001", "node-1", 30000);
 
         assertThat(renewed).isTrue();
+        verify(redisTemplate).execute(any(RedisScript.class), anyList(), eq("node-1"), eq("30000"));
     }
 }

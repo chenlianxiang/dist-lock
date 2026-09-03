@@ -92,6 +92,7 @@ public class RedisLockStorageProvider implements LockStorageProvider {
             Long result = redisTemplate.execute(
                     RENEW_SCRIPT,
                     Collections.singletonList(lockKey),
+                    owner,
                     String.valueOf(leaseMillis)
             );
             return result != null && result > 0;
