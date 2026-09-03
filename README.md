@@ -50,7 +50,7 @@ namespace 类的包名与类名属于持久协议，滚动发布期间不可随�
 
 ```java
 LockOperation operation = locker
-    .lock(order, OrderDTO::getOrderId)
+    .lock(order, Order::getOrderId)
     .strategy(LockStrategy.DATABASE)
     .waitTimeout(Duration.ofSeconds(3))
     .leaseTime(Duration.ofSeconds(30))
@@ -67,6 +67,8 @@ dist-lock:
   default-wait-timeout: 3000
   default-lease-time: 30000
   watchdog-enabled: true
+  watchdog-threads: 4
+  database-operation-timeout: 3000
 ```
 
 ### 3. 执行业务
@@ -100,6 +102,19 @@ OrderResult result = operation
 ```
 
 `tryCall` 只把正常的锁竞争超时转换为 `LockOutcome.TIMEOUT`。存储故障、锁所有权丢失和业务异常不会被伪装成普通竞争失败。
+
+关键写入可以取得本次 acquisition 的 fencing token：
+
+```java
+OrderResult result = locker
+    .lock(order, Order::getOrderId)
+    .callWithHandle(handle -> orderRepository.pay(
+        order,
+        handle.fencingToken()
+    ));
+```
+
+token 由存储层对同一锁键单调递增。它只有在下游写入同时校验“只接受比已记录值更大的 token”时，才能阻止已失去租约的旧持有者覆盖新结果。批量锁可通过 `handle.leases()` 获取每个完整锁键及其 token。
 
 ## 策略路由
 
@@ -145,17 +160,29 @@ dist-lock-provider-db/src/main/resources/schema/schema-mysql.sql
 ## 验证
 
 ```bash
-mvn --batch-mode --no-transfer-progress clean verify
+./mvnw --batch-mode --no-transfer-progress clean verify
 ```
 
-GitHub Actions 会在 `main`、`fix/**` 分支及 Pull Request 上自动执行验证。
+GitHub Actions 会在 `main`、`fix/**`、`feat/**` 分支及 Pull Request 上自动执行验证。验证包含单元测试、MySQL/Redis Testcontainers 集成测试、JaCoCo 覆盖率门禁、SpotBugs 和 Maven Enforcer。
+
+## 可观测性
+
+引入 Spring Boot Actuator 与 Micrometer 后，Starter 自动提供健康检查和以下指标：
+
+- `dist.lock.executions`：按策略和结果统计执行次数；
+- `dist.lock.execution.duration`：锁操作耗时；
+- `dist.lock.resources`：单次操作的资源数量；
+- `dist.lock.watchdog.renewals`：续期成功、延迟、失败和丢锁次数；
+- `dist.lock.watchdog.delay`：看门狗调度延迟。
+
+健康检查会验证已装配 Provider 的连接，并报告各看门狗当前活跃任务数。
 
 ## 正确性边界
 
 - 同一线程嵌套获取相同策略和锁键会快速失败；当前版本不支持重入。
 - 批量锁键会去重并按完整键排序，消除循环等待。
 - 每次 acquisition 使用独立 owner token，释放和续期必须匹配本次 owner。
-- 看门狗只能降低租约意外过期概率，不能替代 fencing token。
-- 在支付、资金、库存等关键写入场景中，业务仍需保持幂等；fencing token 正在 Issue #1 中跟踪。
+- 看门狗续期失败超过租约边界或发现 owner 不匹配时，业务返回前会抛出 `LockLostException`。
+- 数据库与 Redis Provider 都返回单调递增的 fencing token；支付、资金、库存等关键写入必须在下游持久化层校验 token，并继续保持业务幂等。
 
 更完整的原理与扩展说明见 [技术规格](document/DOCUMENTATION.md)。

@@ -15,8 +15,8 @@ final class DistributedLockHealthIndicator implements HealthIndicator {
 
     DistributedLockHealthIndicator(Map<String, LockStorageProvider> providers,
                                    Map<String, WatchdogCoordinator> watchdogs) {
-        this.providers = providers;
-        this.watchdogs = watchdogs;
+        this.providers = Map.copyOf(providers);
+        this.watchdogs = Map.copyOf(watchdogs);
     }
 
     @Override

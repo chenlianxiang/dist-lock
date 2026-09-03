@@ -20,10 +20,10 @@ import java.util.Objects;
 /**
  * 基于 Redis 的分布式锁存储实现。
  * <p>
- * 采用原生原子 SET NX PX 指令与经典 Lua 脚本保障持有者原子释放与看门狗原子续期，
+ * 采用 Lua 原子获取与 fencing token，并通过脚本保障持有者原子释放与看门狗原子续期，
  * 适用于超高 QPS、毫秒级/纳秒级争抢的极速业务场景（如秒杀、高频防重）。
  */
-public class RedisLockStorageProvider implements LockStorageProvider {
+public final class RedisLockStorageProvider implements LockStorageProvider {
 
     private static final Logger log = LoggerFactory.getLogger(RedisLockStorageProvider.class);
 

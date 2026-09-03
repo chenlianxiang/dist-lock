@@ -25,7 +25,7 @@ import java.util.function.Supplier;
  * 3. 使用数据库全局统一时间戳消除各微服务服务器之间的时钟漂移（Clock Skew）；
  * 4. 自动处理初次建行与过期记录的抢占。
  */
-public class DatabaseLockStorageProvider implements LockStorageProvider {
+public final class DatabaseLockStorageProvider implements LockStorageProvider {
 
     private final JdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
