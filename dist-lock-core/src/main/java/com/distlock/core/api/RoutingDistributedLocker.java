@@ -6,7 +6,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
-import java.util.function.Supplier;
 
 /**
  * 在链式配置执行时，根据 strategy 选择具体锁执行器。
@@ -38,7 +37,7 @@ public class RoutingDistributedLocker implements DistributedLocker {
         return LockOperation.create(resourceOrResources, keyExtractor, this::execute);
     }
 
-    private LockOutcome<?> execute(LockOperation.Snapshot snapshot, Supplier<?> action) {
+    private LockOutcome<?> execute(LockOperation.Snapshot snapshot, Function<LockHandle, ?> action) {
         String strategyName = snapshot.strategy() == null
                 ? defaultStrategyName : normalize(snapshot.strategy().name());
         DistributedLocker target = requireLocker(strategyName);
@@ -57,7 +56,7 @@ public class RoutingDistributedLocker implements DistributedLocker {
         if (snapshot.watchdogEnabled() != null) {
             operation = operation.watchdog(snapshot.watchdogEnabled());
         }
-        return operation.tryCall(action);
+        return operation.tryCallWithHandle(action);
     }
 
     private static LockOperation forward(DistributedLocker target, LockOperation.Snapshot snapshot) {
