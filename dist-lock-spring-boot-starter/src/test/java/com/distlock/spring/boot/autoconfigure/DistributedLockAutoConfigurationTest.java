@@ -8,9 +8,13 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
+import java.util.function.Function;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 class DistributedLockAutoConfigurationTest {
+
+    private static final class StarterTestLock {}
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(
@@ -37,7 +41,8 @@ class DistributedLockAutoConfigurationTest {
             assertThat(primaryLocker).isNotNull();
 
             // 验证链式操作可以配置策略
-            var operation = primaryLocker.lock("starter-test", "1")
+            var operation = primaryLocker.lock("1", Function.identity())
+                    .scope(StarterTestLock.class)
                     .strategy(LockStrategy.DATABASE);
             assertThat(operation).isNotNull();
 

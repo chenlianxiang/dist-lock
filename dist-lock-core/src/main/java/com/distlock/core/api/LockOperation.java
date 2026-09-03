@@ -2,9 +2,10 @@ package com.distlock.core.api;
 
 import java.time.Duration;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import java.util.TreeSet;
+import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -20,8 +21,8 @@ public final class LockOperation {
         LockOutcome<?> execute(Snapshot snapshot, Supplier<?> action);
     }
 
-    record Snapshot(String namespace,
-                    List<String> businessKeys,
+    record Snapshot(Class<?> namespace,
+                    List<Object> businessKeys,
                     List<String> qualifiedKeys,
                     LockStrategy strategy,
                     Long waitTimeoutMillis,
@@ -37,36 +38,52 @@ public final class LockOperation {
         this.executor = executor;
     }
 
-    static LockOperation single(String namespace, Object key, Executor executor) {
-        return multiple(namespace, List.of(requireKey(key)), executor);
+    interface NamespaceCarrier {
+        Class<?> lockNamespace();
     }
 
-    static <T> LockOperation batch(String namespace,
-                                   Collection<T> resources,
-                                   Function<T, ?> keyExtractor,
-                                   Executor executor) {
-        Objects.requireNonNull(resources, "resources must not be null");
+    static <T> LockOperation create(Object resourceOrResources,
+                                    Function<T, ?> keyExtractor,
+                                    Executor executor) {
+        Objects.requireNonNull(resourceOrResources, "resourceOrResources must not be null");
         Objects.requireNonNull(keyExtractor, "keyExtractor must not be null");
+        Collection<?> resources = resourceOrResources instanceof Collection<?> collection
+                ? collection : Collections.singletonList(resourceOrResources);
         if (resources.isEmpty()) {
             throw new IllegalArgumentException("resources must not be empty");
         }
-        TreeSet<String> keys = new TreeSet<>();
-        for (T resource : resources) {
+        TreeMap<String, Object> keys = new TreeMap<>();
+        Class<?> namespace = null;
+        for (Object resource : resources) {
             if (resource == null) {
                 throw new IllegalArgumentException("resources must not contain null elements");
             }
-            keys.add(requireKey(keyExtractor.apply(resource)));
+            Class<?> resourceNamespace = resolveNamespace(resource);
+            if (namespace == null) {
+                namespace = resourceNamespace;
+            } else if (!namespace.equals(resourceNamespace)) {
+                throw new IllegalArgumentException("resources must share one namespace, but found ["
+                        + namespace.getName() + "] and [" + resourceNamespace.getName() + "]");
+            }
+            Object key;
+            try {
+                @SuppressWarnings("unchecked")
+                T typedResource = (T) resource;
+                key = keyExtractor.apply(typedResource);
+            } catch (ClassCastException exception) {
+                throw new IllegalArgumentException("keyExtractor does not accept resource type ["
+                        + resource.getClass().getName() + "]", exception);
+            }
+            keys.put(qualify(namespace, key), key);
         }
-        return multiple(namespace, List.copyOf(keys), executor);
+        return fromQualified(namespace, List.copyOf(keys.values()), List.copyOf(keys.keySet()), executor);
     }
 
-    private static LockOperation multiple(String namespace, List<String> businessKeys, Executor executor) {
-        String normalizedNamespace = requireNamespace(namespace);
-        List<String> qualifiedKeys = businessKeys.stream()
-                .map(key -> qualify(normalizedNamespace, key))
-                .sorted()
-                .toList();
-        Snapshot snapshot = new Snapshot(normalizedNamespace, List.copyOf(businessKeys), qualifiedKeys,
+    private static LockOperation fromQualified(Class<?> namespace,
+                                               List<Object> businessKeys,
+                                               List<String> qualifiedKeys,
+                                               Executor executor) {
+        Snapshot snapshot = new Snapshot(namespace, businessKeys, qualifiedKeys,
                 null, null, null, null);
         return new LockOperation(snapshot, Objects.requireNonNull(executor, "executor must not be null"));
     }
@@ -88,6 +105,21 @@ public final class LockOperation {
 
     public LockOperation watchdog(boolean enabled) {
         return copy(snapshot.strategy(), snapshot.waitTimeoutMillis(), snapshot.leaseMillis(), enabled);
+    }
+
+    /**
+     * 为同一实体划分独立锁域。普通场景无需配置，默认使用资源对象的用户类。
+     */
+    public LockOperation scope(Class<?> namespace) {
+        Objects.requireNonNull(namespace, "namespace must not be null");
+        TreeMap<String, Object> keys = new TreeMap<>();
+        for (Object key : snapshot.businessKeys()) {
+            keys.put(qualify(namespace, key), key);
+        }
+        Snapshot scoped = new Snapshot(namespace, List.copyOf(keys.values()), List.copyOf(keys.keySet()),
+                snapshot.strategy(), snapshot.waitTimeoutMillis(), snapshot.leaseMillis(),
+                snapshot.watchdogEnabled());
+        return new LockOperation(scoped, executor);
     }
 
     public <R> R call(Supplier<R> action) {
@@ -117,31 +149,49 @@ public final class LockOperation {
                 strategy, waitTimeoutMillis, leaseMillis, watchdogEnabled), executor);
     }
 
-    private static String requireNamespace(String namespace) {
-        if (namespace == null || namespace.isBlank()) {
-            throw new IllegalArgumentException("namespace must not be blank");
-        }
-        return namespace.trim();
-    }
-
-    private static String requireKey(Object key) {
-        if (key == null) {
-            throw new IllegalArgumentException("lock key must not be null");
-        }
-        String businessKey = key.toString();
-        if (businessKey.isBlank()) {
-            throw new IllegalArgumentException("lock key must not be blank");
-        }
-        return businessKey;
-    }
-
-    private static String qualify(String namespace, String businessKey) {
-        String qualified = namespace + ":" + businessKey;
+    private static String qualify(Class<?> namespace, Object key) {
+        Objects.requireNonNull(namespace, "namespace must not be null");
+        String encodedKey = encodeKey(key);
+        String qualified = "dist-lock:v1:" + namespace.getName() + ":"
+                + key.getClass().getName() + ":" + encodedKey;
         if (qualified.length() > MAX_QUALIFIED_KEY_LENGTH) {
             throw new IllegalArgumentException("qualified lock key exceeds "
                     + MAX_QUALIFIED_KEY_LENGTH + " characters: " + qualified.length());
         }
         return qualified;
+    }
+
+    private static Class<?> resolveNamespace(Object resource) {
+        if (resource instanceof NamespaceCarrier carrier) {
+            return Objects.requireNonNull(carrier.lockNamespace(), "carried namespace must not be null");
+        }
+        Class<?> type = resource.getClass();
+        while (type.getSuperclass() != null
+                && type.getSuperclass() != Object.class
+                && (type.getName().contains("$$") || type.getName().contains("$HibernateProxy$"))) {
+            type = type.getSuperclass();
+        }
+        return type;
+    }
+
+    private static String encodeKey(Object key) {
+        if (key == null) {
+            throw new IllegalArgumentException("lock key must not be null");
+        }
+        if (key instanceof CharSequence
+                || key instanceof Number
+                || key instanceof java.util.UUID
+                || key instanceof Enum<?>
+                || key instanceof Boolean
+                || key instanceof Character) {
+            String encoded = key.toString();
+            if (encoded.isBlank()) {
+                throw new IllegalArgumentException("lock key must not be blank");
+            }
+            return encoded;
+        }
+        throw new IllegalArgumentException("lock key type [" + key.getClass().getName()
+                + "] has no stable encoding; extract a String, Number, UUID, enum, boolean or character key");
     }
 
     private static long toMillis(Duration duration, boolean zeroAllowed, String name) {

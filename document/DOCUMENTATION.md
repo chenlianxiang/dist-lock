@@ -4,52 +4,74 @@
 
 组件将三个相互独立的关注点分开：
 
-1. `DistributedLocker`：声明单个或批量业务资源；
+1. `DistributedLocker.lock`：通过唯一入口声明单个或批量业务资源；
 2. `LockOperation`：不可变的链式配置；
 3. `call/run/tryCall`：终止配置并执行业务。
 
-公开接口不再通过重载排列单对象、集合、超时、租期、策略、返回值和失败处理。增加配置项时只扩展 `LockOperation`，不会复制执行方法。
+公开接口只有一个 `lock(resourceOrResources, keyExtractor)`，不再通过重载排列单对象、集合、超时、租期、策略、返回值和失败处理。单对象在内部包装为单元素集合，之后统一执行校验、取键、去重、排序、获取、续期和释放。增加配置项时只扩展 `LockOperation`，不会复制执行方法。
 
 ## 2. API 生命周期
 
 ```mermaid
 flowchart TD
-    A[声明 lock / locks] --> B[生成 LockOperation]
-    B --> C[链式覆盖策略与租约]
-    C --> D{终止操作}
-    D -->|call| E[执行并返回]
-    D -->|run| F[执行无返回业务]
-    D -->|tryCall| G[返回 LockOutcome]
+    A[声明唯一 lock] --> B[统一资源集合]
+    B --> C[生成 LockOperation]
+    C --> D[链式覆盖策略与租约]
+    D --> E{终止操作}
+    E -->|call| F[执行并返回]
+    E -->|run| G[执行无返回业务]
+    E -->|tryCall| H[返回 LockOutcome]
 ```
 
 示例：
 
 ```java
 LockOperation paymentLock = locker
-    .lock("order-payment", orderId)
+    .lock(order, Order::getOrderId)
     .strategy(LockStrategy.DATABASE)
     .waitTimeout(Duration.ofSeconds(3))
     .leaseTime(Duration.ofSeconds(30))
     .watchdog(true);
 
-OrderResult result = paymentLock.call(() -> paymentService.pay(orderId));
+OrderResult result = paymentLock.call(() -> paymentService.pay(order));
 ```
 
 配置阶段不会访问存储。只有调用 `call`、`run` 或 `tryCall` 才开始获取锁。
 
 ## 3. 锁键规范
 
-锁键必须由稳定业务 namespace 和业务主键组成：
+调用方提供业务对象和取键函数，namespace 默认从资源对象的稳定用户类推导：
 
-```text
-qualified-key = namespace + ":" + business-key
+```java
+locker.lock(order, Order::getOrderId);
+locker.lock(stocks, SkuStock::getSkuCode);
 ```
 
-组件不再使用运行时对象类名推断 namespace，避免 JDK Proxy、CGLIB、Hibernate 和 ByteBuddy 类型变化造成不同节点生成不同锁键。
+锁键由 namespace 的全限定类名、取键结果的实际类型和业务键组成：
+
+```text
+qualified-key = "dist-lock:v1:" + namespace-class-name + ":" + key-class-name + ":" + business-key
+```
+
+组件会剥离常见 CGLIB/Hibernate 代理子类，尽量解析为稳定用户类。不同资源类型即使提取出相同值，也不会发生无关锁竞争。字符串 `"1"` 与数值 `1` 也属于不同锁键。
+
+同一实体若存在互不影响的锁域，应定义专用标记类：
+
+```java
+final class OrderPaymentLock {}
+final class OrderCancelLock {}
+
+locker.lock(order, Order::getOrderId)
+    .scope(OrderPaymentLock.class)
+    .call(() -> paymentService.pay(order));
+```
+
+标记类的全限定名是跨节点协议。包名或类名变更会创建新的锁域，因此滚动发布期间不可直接重命名。
 
 约束：
 
-- namespace、业务键不能为空；
+- 业务对象、取键函数和业务键不能为空；
+- 默认业务键仅接受 String、Number、UUID、enum、boolean 和 character 等稳定值类型；
 - 批量资源不能包含 null；
 - 完整锁键最长255字符，以兼容数据库表结构；
 - 批量键在配置阶段完成去重和全局排序。
@@ -150,7 +172,7 @@ Java 调用必须依次传入 owner 和 leaseMillis。
 后续设计将在不增加执行重载的前提下扩展：
 
 ```java
-locker.lock("inventory", skuId)
+locker.lock(stock, SkuStock::getSkuCode)
     .fencing(FencingPolicy.REQUIRED)
     .observability(observation)
     .call(handle -> inventoryService.deduct(skuId, handle.fencingToken()));

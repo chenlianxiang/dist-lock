@@ -76,7 +76,7 @@ public class ExampleRunner implements CommandLineRunner {
         // --- 场景 5：在单次链式配置中选择锁策略 ---
         log.info("[案例 5]：通过链式配置自主选择 DATABASE 策略");
         OrderDTO vipOrder = new OrderDTO("ORD-VIP-001", "U_999", new BigDecimal("8888.00"));
-        String vipResult = locker.lock("vip-order-payment", vipOrder.getOrderId())
+        String vipResult = locker.lock(vipOrder, OrderDTO::getOrderId)
                 .strategy(LockStrategy.DATABASE)
                 .call(() -> "VIP_ORDER_PAID_" + vipOrder.getOrderId());
         log.info(">>> 案例 5 结论 (自主指定 DATABASE 策略): {}\n", vipResult);

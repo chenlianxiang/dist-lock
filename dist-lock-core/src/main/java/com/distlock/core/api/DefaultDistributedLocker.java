@@ -9,7 +9,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -61,15 +60,9 @@ public class DefaultDistributedLocker implements DistributedLocker {
     }
 
     @Override
-    public LockOperation lock(String namespace, Object key) {
-        return LockOperation.single(namespace, key, this::execute);
-    }
-
-    @Override
-    public <T> LockOperation locks(String namespace,
-                                   Collection<T> resources,
-                                   Function<T, ?> keyExtractor) {
-        return LockOperation.batch(namespace, resources, keyExtractor, this::execute);
+    public <T> LockOperation lock(Object resourceOrResources,
+                                  Function<T, ?> keyExtractor) {
+        return LockOperation.create(resourceOrResources, keyExtractor, this::execute);
     }
 
     private LockOutcome<?> execute(LockOperation.Snapshot snapshot, Supplier<?> action) {

@@ -25,7 +25,7 @@ public class OrderService {
      * 若短时间内并发重复点击，直接抛出用户特制友好异常：“当前订单正在支付中，请勿重复操作”。
      */
     public String payOrder(OrderDTO order) {
-        return locker.lock("order-payment", order.getOrderId())
+        return locker.lock(order, OrderDTO::getOrderId)
                 .tryCall(() -> {
                     log.info("--> 获得订单锁，正在执行支付扣款: {}", order.getOrderId());
                     try {

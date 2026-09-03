@@ -119,7 +119,7 @@ class DatabaseLockConcurrentTest {
                 try {
                     startLatch.await();
                     for (int j = 0; j < perThreadRuns; j++) {
-                        Integer currentResult = locker.lock("order", targetOrder.getOrderId()).call(() -> {
+                        Integer currentResult = locker.lock(targetOrder, Order::getOrderId).call(() -> {
                             int current = counter.get();
                             try {
                                 Thread.sleep(5);
@@ -154,7 +154,7 @@ class DatabaseLockConcurrentTest {
 
         // 线程 1 占用锁
         new Thread(() -> {
-            locker.lock("order", sharedOrder.getOrderId()).run(() -> {
+            locker.lock(sharedOrder, Order::getOrderId).run(() -> {
                 lockHoldingLatch.countDown();
                 try {
                     releaseSignalLatch.await(3, TimeUnit.SECONDS);
@@ -167,7 +167,7 @@ class DatabaseLockConcurrentTest {
 
         // 1. 默认兜底提示：抛出默认稳健的友好提示
         assertThatThrownBy(() -> {
-            locker.lock("order", sharedOrder.getOrderId())
+            locker.lock(sharedOrder, Order::getOrderId)
                     .waitTimeout(Duration.ofMillis(100))
                     .call(() -> "FAIL");
         }).isInstanceOf(LockTimeoutException.class)
@@ -175,7 +175,7 @@ class DatabaseLockConcurrentTest {
 
         // 2. 特制友好文案：抛出带有用户指定文案的异常
         assertThatThrownBy(() -> {
-            locker.lock("order", sharedOrder.getOrderId())
+            locker.lock(sharedOrder, Order::getOrderId)
                     .waitTimeout(Duration.ofMillis(100))
                     .tryCall(() -> "FAIL")
                     .orElseThrow(() -> new CustomBizException(40900, "当前订单正在支付中，请勿重复操作"));
@@ -184,7 +184,7 @@ class DatabaseLockConcurrentTest {
 
         // 3. 特制自定义业务异常：抛出用户特定业务异常
         assertThatThrownBy(() -> {
-            locker.lock("order", sharedOrder.getOrderId())
+            locker.lock(sharedOrder, Order::getOrderId)
                     .waitTimeout(Duration.ofMillis(100))
                     .tryCall(() -> "FAIL")
                     .orElseThrow(() -> new CustomBizException(40901, "账户资金被锁定"));
@@ -192,7 +192,7 @@ class DatabaseLockConcurrentTest {
                 .hasMessage("账户资金被锁定");
 
         // 4. 函数式值降级：不抛异常，优雅返回降级对象
-        String fallbackConclusion = locker.lock("order", sharedOrder.getOrderId())
+        String fallbackConclusion = locker.lock(sharedOrder, Order::getOrderId)
                 .waitTimeout(Duration.ofMillis(100))
                 .tryCall(() -> "NORMAL_SUCCESS")
                 .orElse("DEGRADED_VALUE");
@@ -216,7 +216,7 @@ class DatabaseLockConcurrentTest {
         for (int i = 0; i < iterations; i++) {
             executor.submit(() -> {
                 try {
-                    Boolean res = locker.locks("inventory", listA, SkuStock::getSkuCode).call(() -> {
+                    Boolean res = locker.lock(listA, SkuStock::getSkuCode).call(() -> {
                         try {
                             Thread.sleep(10);
                         } catch (InterruptedException ignored) {
@@ -231,7 +231,7 @@ class DatabaseLockConcurrentTest {
             });
             executor.submit(() -> {
                 try {
-                    Boolean res = locker.locks("inventory", listB, SkuStock::getSkuCode).call(() -> {
+                    Boolean res = locker.lock(listB, SkuStock::getSkuCode).call(() -> {
                         try {
                             Thread.sleep(10);
                         } catch (InterruptedException ignored) {
@@ -256,7 +256,7 @@ class DatabaseLockConcurrentTest {
     @Test
     @DisplayName("集合批量加锁部分失败自动原子回滚与特制报错")
     void testBatchLockRollbackAndCustomError() throws Exception {
-        String occupiedKey = "inventory:SKU-002";
+        String occupiedKey = lockKey(SkuStock.class, String.class, "SKU-002");
         boolean preOccupied = storageProvider.tryAcquire(occupiedKey, "external-holder", 2000);
         assertThat(preOccupied).isTrue();
 
@@ -264,7 +264,7 @@ class DatabaseLockConcurrentTest {
 
         // 批量加锁失败后，由 LockOutcome 映射为特制业务异常
         assertThatThrownBy(() -> {
-            locker.locks("inventory", batch, SkuStock::getSkuCode)
+            locker.lock(batch, SkuStock::getSkuCode)
                     .waitTimeout(Duration.ofMillis(100))
                     .tryCall(() -> "FAIL")
                     .orElseThrow(() -> new CustomBizException(40902, "购物车部分商品正在被抢购，请稍后结算"));
@@ -272,7 +272,7 @@ class DatabaseLockConcurrentTest {
                 .hasMessage("购物车部分商品正在被抢购，请稍后结算");
 
         // 验证已获取的 SKU-001 已经被自动回滚释放
-        String sku1Key = "inventory:SKU-001";
+        String sku1Key = lockKey(SkuStock.class, String.class, "SKU-001");
         boolean canAcquireSku1 = storageProvider.tryAcquire(sku1Key, "new-owner", 1000);
         assertThat(canAcquireSku1).as("SKU-001 在批量失败后应已被逆序回滚释放").isTrue();
         storageProvider.release(sku1Key, "new-owner");
@@ -283,10 +283,14 @@ class DatabaseLockConcurrentTest {
     @Test
     @DisplayName("数据库锁不允许仅凭相同 owner 重入，避免内层提前释放外层锁")
     void testSameOwnerCannotReenter() {
-        String lockKey = Order.class.getName() + ":ORD-REENTRANT";
+        String lockKey = lockKey(Order.class, String.class, "ORD-REENTRANT");
 
         assertThat(storageProvider.tryAcquire(lockKey, "same-owner", 5000)).isTrue();
         assertThat(storageProvider.tryAcquire(lockKey, "same-owner", 5000)).isFalse();
         assertThat(storageProvider.release(lockKey, "same-owner")).isTrue();
+    }
+
+    private static String lockKey(Class<?> namespace, Class<?> keyType, String key) {
+        return "dist-lock:v1:" + namespace.getName() + ":" + keyType.getName() + ":" + key;
     }
 }

@@ -27,11 +27,15 @@ class DefaultDistributedLockerSafetyTest {
     );
 
     record Order(String id) {}
+    private static final class InventoryLock {}
+    private static final class PaymentLock {}
+    private static final class CancellationLock {}
 
     @Test
     void rejectsReentrantLockingAndReleasesOuterLock() {
-        assertThatThrownBy(() -> locker.lock("order", "42").call(() ->
-                locker.lock("order", "42").call(() -> "unexpected")))
+        Order order = new Order("42");
+        assertThatThrownBy(() -> locker.lock(order, Order::id).call(() ->
+                locker.lock(order, Order::id).call(() -> "unexpected")))
                 .isInstanceOf(LockAcquisitionException.class)
                 .hasMessageContaining("Reentrant locking is not supported");
 
@@ -40,12 +44,12 @@ class DefaultDistributedLockerSafetyTest {
 
     @Test
     void rejectsInvalidResourcesBeforeBusinessExecution() {
-        assertThatThrownBy(() -> locker.locks(
-                "order", java.util.Arrays.asList(new Order("1"), null), Order::id))
+        assertThatThrownBy(() -> locker.lock(
+                java.util.Arrays.asList(new Order("1"), null), Order::id))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("must not contain null");
 
-        assertThatThrownBy(() -> locker.lock("order", " "))
+        assertThatThrownBy(() -> locker.lock(new Order(" "), Order::id))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("must not be blank");
 
@@ -54,16 +58,17 @@ class DefaultDistributedLockerSafetyTest {
 
     @Test
     void batchKeysAreDeduplicatedAndGloballySorted() {
-        locker.locks("inventory", List.of("SKU-2", "SKU-1", "SKU-2"), Function.identity())
+        locker.lock(List.of("SKU-2", "SKU-1", "SKU-2"), Function.identity())
+                .scope(InventoryLock.class)
                 .call(() -> true);
 
-        assertThat(storage.acquireOrder)
-                .containsExactly("inventory:SKU-1", "inventory:SKU-2");
+        assertThat(storage.acquireOrder).hasSize(2).isSorted();
+        assertThat(storage.acquireOrder).allMatch(key -> key.startsWith("dist-lock:v1:"));
     }
 
     @Test
     void chainConfigurationIsImmutableAndValidated() {
-        LockOperation base = locker.lock("order", "42");
+        LockOperation base = locker.lock(new Order("42"), Order::id);
         LockOperation configured = base
                 .waitTimeout(Duration.ZERO)
                 .leaseTime(Duration.ofSeconds(5))
@@ -78,10 +83,12 @@ class DefaultDistributedLockerSafetyTest {
 
     @Test
     void tryCallSeparatesContentionFromBusinessExecution() {
-        storage.owners.put("order:42", "external-owner");
+        locker.lock(new Order("42"), Order::id).call(() -> true);
+        String physicalKey = storage.acquireOrder.get(0);
+        storage.owners.put(physicalKey, "external-owner");
         AtomicBoolean actionCalled = new AtomicBoolean();
 
-        LockOutcome<String> outcome = locker.lock("order", "42")
+        LockOutcome<String> outcome = locker.lock(new Order("42"), Order::id)
                 .waitTimeout(Duration.ZERO)
                 .tryCall(() -> {
                     actionCalled.set(true);
@@ -91,6 +98,26 @@ class DefaultDistributedLockerSafetyTest {
         assertThat(outcome.status()).isEqualTo(LockOutcome.Status.TIMEOUT);
         assertThat(outcome.orElse("fallback")).isEqualTo("fallback");
         assertThat(actionCalled).isFalse();
+    }
+
+    @Test
+    void classNamespaceAndKeyTypePreventAccidentalCollisions() {
+        locker.lock("42", Function.identity()).scope(PaymentLock.class).call(() -> true);
+        locker.lock("42", Function.identity()).scope(CancellationLock.class).call(() -> true);
+        locker.lock(42L, Function.identity()).scope(PaymentLock.class).call(() -> true);
+
+        assertThat(storage.acquireOrder).hasSize(3).doesNotHaveDuplicates();
+    }
+
+    @Test
+    void singleObjectAndCollectionUseTheSameLockPipeline() {
+        Order order = new Order("42");
+
+        locker.lock(order, Order::id).call(() -> true);
+        locker.lock(List.of(order), Order::id).call(() -> true);
+
+        assertThat(storage.acquireOrder).hasSize(2);
+        assertThat(storage.acquireOrder.get(0)).isEqualTo(storage.acquireOrder.get(1));
     }
 
     private static final class InMemoryStorageProvider implements LockStorageProvider {

@@ -2,7 +2,6 @@ package com.distlock.core.api;
 
 import org.junit.jupiter.api.Test;
 
-import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
@@ -19,8 +18,8 @@ class RoutingDistributedLockerTest {
         RoutingDistributedLocker router = new RoutingDistributedLocker(
                 Map.of("DATABASE", database, "REDIS", redis), "DATABASE");
 
-        String defaultResult = router.lock("order", "1").call(() -> "DB");
-        String redisResult = router.lock("order", "2")
+        String defaultResult = router.lock("1", Function.identity()).call(() -> "DB");
+        String redisResult = router.lock("2", Function.identity())
                 .strategy(LockStrategy.REDIS)
                 .call(() -> "REDIS");
 
@@ -35,7 +34,7 @@ class RoutingDistributedLockerTest {
         RoutingDistributedLocker router = new RoutingDistributedLocker(
                 Map.of("DATABASE", new RecordingLocker()), "REDIS");
 
-        assertThatThrownBy(() -> router.lock("order", "2").call(() -> "RESULT"))
+        assertThatThrownBy(() -> router.lock("2", Function.identity()).call(() -> "RESULT"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Lock strategy [REDIS] is not available");
     }
@@ -44,18 +43,9 @@ class RoutingDistributedLockerTest {
         private final AtomicInteger executions = new AtomicInteger();
 
         @Override
-        public LockOperation lock(String namespace, Object key) {
-            return LockOperation.single(namespace, key, (snapshot, action) -> {
-                executions.incrementAndGet();
-                return LockOutcome.acquired(action.get());
-            });
-        }
-
-        @Override
-        public <T> LockOperation locks(String namespace,
-                                       Collection<T> resources,
-                                       Function<T, ?> keyExtractor) {
-            return LockOperation.batch(namespace, resources, keyExtractor, (snapshot, action) -> {
+        public <T> LockOperation lock(Object resourceOrResources,
+                                      Function<T, ?> keyExtractor) {
+            return LockOperation.create(resourceOrResources, keyExtractor, (snapshot, action) -> {
                 executions.incrementAndGet();
                 return LockOutcome.acquired(action.get());
             });

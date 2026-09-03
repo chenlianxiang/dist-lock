@@ -1,7 +1,7 @@
 package com.distlock.core.api;
 
 import java.time.Duration;
-import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,15 +33,9 @@ public class RoutingDistributedLocker implements DistributedLocker {
     }
 
     @Override
-    public LockOperation lock(String namespace, Object key) {
-        return LockOperation.single(namespace, key, this::execute);
-    }
-
-    @Override
-    public <T> LockOperation locks(String namespace,
-                                   Collection<T> resources,
-                                   Function<T, ?> keyExtractor) {
-        return LockOperation.batch(namespace, resources, keyExtractor, this::execute);
+    public <T> LockOperation lock(Object resourceOrResources,
+                                  Function<T, ?> keyExtractor) {
+        return LockOperation.create(resourceOrResources, keyExtractor, this::execute);
     }
 
     private LockOutcome<?> execute(LockOperation.Snapshot snapshot, Supplier<?> action) {
@@ -49,9 +43,7 @@ public class RoutingDistributedLocker implements DistributedLocker {
                 ? defaultStrategyName : normalize(snapshot.strategy().name());
         DistributedLocker target = requireLocker(strategyName);
 
-        LockOperation operation = snapshot.businessKeys().size() == 1
-                ? target.lock(snapshot.namespace(), snapshot.businessKeys().get(0))
-                : target.locks(snapshot.namespace(), snapshot.businessKeys(), Function.identity());
+        LockOperation operation = forward(target, snapshot);
 
         if (snapshot.strategy() != null) {
             operation = operation.strategy(snapshot.strategy());
@@ -66,6 +58,17 @@ public class RoutingDistributedLocker implements DistributedLocker {
             operation = operation.watchdog(snapshot.watchdogEnabled());
         }
         return operation.tryCall(action);
+    }
+
+    private static LockOperation forward(DistributedLocker target, LockOperation.Snapshot snapshot) {
+        List<RoutedResource> resources = snapshot.businessKeys().stream()
+                .map(key -> new RoutedResource(snapshot.namespace(), key))
+                .toList();
+        return target.lock(resources, RoutedResource::key);
+    }
+
+    private record RoutedResource(Class<?> lockNamespace, Object key)
+            implements LockOperation.NamespaceCarrier {
     }
 
     private DistributedLocker requireLocker(String strategyName) {

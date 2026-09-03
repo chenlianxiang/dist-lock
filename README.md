@@ -19,30 +19,38 @@ dist-lock-example              可运行示例
 ### 1. 声明资源
 
 ```java
-LockOperation operation = locker.lock("order-payment", order.getOrderId());
+LockOperation operation = locker.lock(
+    order,
+    OrderDTO::getOrderId
+);
 ```
 
 批量资源：
 
 ```java
-LockOperation operation = locker.locks(
-    "inventory",
+LockOperation operation = locker.lock(
     items,
     OrderItemDTO::getSkuCode
 );
 ```
 
-namespace 是稳定的业务资源名称，不依赖实体类名或动态代理类型。最终锁键格式为：
+namespace 默认从资源对象的稳定用户类推导，业务方无需重复传入 `OrderDTO.class`。
+需要区分同一实体上的多个独立锁域时，才通过 `.scope(OrderPaymentLock.class)` 使用专用空标记类。
+
+最终锁键包含 namespace 的全限定类名、提取结果的实际类型和规范化业务键：
 
 ```text
-<namespace>:<business-key>
+dist-lock:v1:<namespace-class-name>:<key-class-name>:<business-key>
 ```
+
+因此，不同锁域使用相同业务 ID，或者 `Long(1)` 与字符串 `"1"`，都不会意外成为同一把锁。
+namespace 类的包名与类名属于持久协议，滚动发布期间不可随意重命名。
 
 ### 2. 按需链式配置
 
 ```java
 LockOperation operation = locker
-    .lock("order-payment", order.getOrderId())
+    .lock(order, OrderDTO::getOrderId)
     .strategy(LockStrategy.DATABASE)
     .waitTimeout(Duration.ofSeconds(3))
     .leaseTime(Duration.ofSeconds(30))
@@ -99,7 +107,7 @@ OrderResult result = operation
 
 ```java
 boolean success = locker
-    .lock("seckill-stock", skuCode)
+    .lock(stock, SkuStock::getSkuCode)
     .strategy(LockStrategy.REDIS)
     .call(() -> stockService.deduct(skuCode));
 ```
