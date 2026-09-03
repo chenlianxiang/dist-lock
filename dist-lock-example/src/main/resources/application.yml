@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: dist-lock-example
+  datasource:
+    url: jdbc:h2:mem:exampledb;DB_CLOSE_DELAY=-1;MODE=MySQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+
+dist-lock:
+  type: DATABASE
+  default-wait-timeout: 3000
+  default-lease-time: 30000
+  watchdog-enabled: true
+
+logging:
+  level:
+    com.distlock: DEBUG
