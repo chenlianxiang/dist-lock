@@ -1,6 +1,7 @@
 package com.distlock.core.api;
 
 import com.distlock.core.exception.LockAcquisitionException;
+import com.distlock.core.fencing.FencingGuard;
 import com.distlock.core.spi.LockStorageProvider;
 import com.distlock.core.spi.LockAcquisition;
 import com.distlock.core.watchdog.WatchdogCoordinator;
@@ -15,6 +16,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -26,6 +28,10 @@ class DefaultDistributedLockerSafetyTest {
             storage,
             new WatchdogCoordinator(storage),
             LockConfig.of(20, TimeUnit.MILLISECONDS, 1, TimeUnit.SECONDS, false)
+                    .withFencingRequired(false),
+            LockStrategy.DATABASE,
+            com.distlock.core.metrics.LockMetrics.NOOP,
+            null
     );
 
     record Order(String id) {}
@@ -130,6 +136,54 @@ class DefaultDistributedLockerSafetyTest {
                 .callWithHandle(LockHandle::fencingToken);
 
         assertThat(second).isGreaterThan(first);
+    }
+
+    @Test
+    void plainCallAutomaticallyRunsInsideConfiguredFencingGuard() {
+        AtomicBoolean guarded = new AtomicBoolean();
+        WatchdogCoordinator coordinator = new WatchdogCoordinator(storage);
+        FencingGuard guard = new FencingGuard() {
+            @Override
+            public <R> R execute(LockHandle handle, Supplier<R> action) {
+                guarded.set(true);
+                assertThat(handle.fencingToken()).isPositive();
+                return action.get();
+            }
+        };
+        DefaultDistributedLocker guardedLocker = new DefaultDistributedLocker(
+                storage,
+                coordinator,
+                LockConfig.defaultConfig(),
+                LockStrategy.DATABASE,
+                com.distlock.core.metrics.LockMetrics.NOOP,
+                guard
+        );
+
+        try {
+            assertThat(guardedLocker.lock(new Order("guarded"), Order::id)
+                    .call(() -> "done")).isEqualTo("done");
+            assertThat(guarded).isTrue();
+        } finally {
+            coordinator.shutdown();
+        }
+    }
+
+    @Test
+    void requiredFencingWithoutGuardFailsDuringConstruction() {
+        WatchdogCoordinator coordinator = new WatchdogCoordinator(storage);
+        try {
+            assertThatThrownBy(() -> new DefaultDistributedLocker(
+                    storage,
+                    coordinator,
+                    LockConfig.defaultConfig(),
+                    LockStrategy.DATABASE,
+                    com.distlock.core.metrics.LockMetrics.NOOP,
+                    null
+            )).isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("no FencingGuard");
+        } finally {
+            coordinator.shutdown();
+        }
     }
 
     private static final class InMemoryStorageProvider implements LockStorageProvider {

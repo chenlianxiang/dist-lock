@@ -11,7 +11,9 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.context.FilteredClassLoader;
+import org.springframework.jdbc.core.JdbcTemplate;
 
+import javax.sql.DataSource;
 import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -40,6 +42,7 @@ class DistributedLockAutoConfigurationTest {
         contextRunner.run(context -> {
             assertThat(context).hasBean("databaseLockStorageProvider");
             assertThat(context).hasBean("dbLocker");
+            assertThat(context).hasBean("databaseFencingGuard");
             assertThat(context).hasBean("distributedLocker");
             assertThat(context).hasSingleBean(LockMetrics.class);
             assertThat(context).hasBean("distributedLockHealthIndicator");
@@ -53,9 +56,26 @@ class DistributedLockAutoConfigurationTest {
                     .strategy(LockStrategy.DATABASE);
             assertThat(operation).isNotNull();
 
+            JdbcTemplate jdbc = new JdbcTemplate(context.getBean(DataSource.class));
+            jdbc.execute("CREATE TABLE IF NOT EXISTS dist_lock ("
+                    + "lock_key VARCHAR(255) PRIMARY KEY, owner VARCHAR(128) NOT NULL, "
+                    + "expire_time BIGINT NOT NULL, version BIGINT NOT NULL)");
+            jdbc.execute("CREATE TABLE IF NOT EXISTS dist_lock_fence ("
+                    + "lock_key VARCHAR(255) PRIMARY KEY, fencing_token BIGINT NOT NULL)");
+            jdbc.execute("CREATE TABLE IF NOT EXISTS starter_business ("
+                    + "business_key VARCHAR(64) PRIMARY KEY)");
+            assertThat(operation.call(() -> jdbc.update(
+                    "INSERT INTO starter_business (business_key) VALUES (?)", "automatic-fencing")))
+                    .isEqualTo(1);
+            assertThat(jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM dist_lock_fence WHERE fencing_token > 0", Integer.class))
+                    .isEqualTo(1);
+
             DistributedLockProperties props = context.getBean(DistributedLockProperties.class);
             assertThat(props.getDefaultWaitTimeout()).isEqualTo(5000);
             assertThat(props.getDefaultLeaseTime()).isEqualTo(20000);
+            assertThat(props.getFencingMode())
+                    .isEqualTo(DistributedLockProperties.FencingMode.REQUIRED);
             HealthIndicator health = context.getBean("distributedLockHealthIndicator", HealthIndicator.class);
             assertThat(health.health().getStatus().getCode()).isEqualTo("UP");
         });

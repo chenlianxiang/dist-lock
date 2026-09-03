@@ -93,8 +93,11 @@ class RedisLockStorageProviderIT {
         DefaultDistributedLocker locker = new DefaultDistributedLocker(
                 provider,
                 coordinator,
-                LockConfig.of(20, TimeUnit.MILLISECONDS, 120, TimeUnit.MILLISECONDS, true),
-                LockStrategy.REDIS
+                LockConfig.of(20, TimeUnit.MILLISECONDS, 120, TimeUnit.MILLISECONDS, true)
+                        .withFencingRequired(false),
+                LockStrategy.REDIS,
+                com.distlock.core.metrics.LockMetrics.NOOP,
+                null
         );
         ExecutorService executor = Executors.newSingleThreadExecutor();
         CountDownLatch businessStarted = new CountDownLatch(1);

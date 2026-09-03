@@ -4,6 +4,7 @@ import com.distlock.core.backoff.AdaptiveBackoff;
 import com.distlock.core.context.LockOwner;
 import com.distlock.core.exception.LockAcquisitionException;
 import com.distlock.core.exception.LockLostException;
+import com.distlock.core.fencing.FencingGuard;
 import com.distlock.core.metrics.LockMetrics;
 import com.distlock.core.spi.LockStorageProvider;
 import com.distlock.core.spi.LockAcquisition;
@@ -26,7 +27,7 @@ import java.util.function.Function;
 /**
  * 绑定单一存储策略的默认锁执行器。
  */
-public class DefaultDistributedLocker implements DistributedLocker {
+public final class DefaultDistributedLocker implements DistributedLocker {
 
     private static final Logger log = LoggerFactory.getLogger(DefaultDistributedLocker.class);
     private static final ThreadLocal<Set<String>> HELD_LOCK_KEYS = ThreadLocal.withInitial(HashSet::new);
@@ -36,38 +37,23 @@ public class DefaultDistributedLocker implements DistributedLocker {
     private final LockConfig defaultConfig;
     private final LockStrategy currentStrategy;
     private final LockMetrics metrics;
-
-    public DefaultDistributedLocker(LockStorageProvider storageProvider) {
-        this(storageProvider, LockStrategy.DATABASE);
-    }
-
-    public DefaultDistributedLocker(LockStorageProvider storageProvider, LockStrategy strategy) {
-        this(storageProvider, new WatchdogCoordinator(storageProvider), LockConfig.defaultConfig(), strategy);
-    }
-
-    public DefaultDistributedLocker(LockStorageProvider storageProvider,
-                                    WatchdogCoordinator watchdogCoordinator,
-                                    LockConfig defaultConfig) {
-        this(storageProvider, watchdogCoordinator, defaultConfig, LockStrategy.DATABASE);
-    }
-
-    public DefaultDistributedLocker(LockStorageProvider storageProvider,
-                                    WatchdogCoordinator watchdogCoordinator,
-                                    LockConfig defaultConfig,
-                                    LockStrategy strategy) {
-        this(storageProvider, watchdogCoordinator, defaultConfig, strategy, LockMetrics.NOOP);
-    }
+    private final FencingGuard fencingGuard;
 
     public DefaultDistributedLocker(LockStorageProvider storageProvider,
                                     WatchdogCoordinator watchdogCoordinator,
                                     LockConfig defaultConfig,
                                     LockStrategy strategy,
-                                    LockMetrics metrics) {
+                                    LockMetrics metrics,
+                                    FencingGuard fencingGuard) {
         this.storageProvider = Objects.requireNonNull(storageProvider, "storageProvider must not be null");
         this.watchdogCoordinator = Objects.requireNonNull(watchdogCoordinator, "watchdogCoordinator must not be null");
         this.defaultConfig = Objects.requireNonNull(defaultConfig, "defaultConfig must not be null");
         this.currentStrategy = strategy != null ? strategy : LockStrategy.DATABASE;
         this.metrics = Objects.requireNonNull(metrics, "metrics must not be null");
+        if (defaultConfig.isFencingRequired() && fencingGuard == null) {
+            throw new IllegalStateException("Fencing is required but no FencingGuard is configured");
+        }
+        this.fencingGuard = fencingGuard;
     }
 
     public LockStrategy getCurrentStrategy() {
@@ -165,7 +151,10 @@ public class DefaultDistributedLocker implements DistributedLocker {
             for (String key : acquiredKeys) {
                 threadHeldKeys.add(strategyScopedKey(key));
             }
-            Object result = action.apply(new LockHandle(owner, acquiredLeases));
+            LockHandle handle = new LockHandle(owner, acquiredLeases);
+            Object result = config.isFencingRequired()
+                    ? fencingGuard.execute(handle, () -> action.apply(handle))
+                    : action.apply(handle);
             WatchdogLease lostLease = watchdogLeases.values().stream()
                     .filter(lease -> lease.state() == WatchdogLease.State.LOST)
                     .findFirst()
@@ -204,7 +193,8 @@ public class DefaultDistributedLocker implements DistributedLocker {
                 ? snapshot.leaseMillis() : defaultConfig.getLeaseMillis();
         boolean watchdog = snapshot.watchdogEnabled() != null
                 ? snapshot.watchdogEnabled() : defaultConfig.isWatchdogEnabled();
-        return new LockConfig(waitTimeout, leaseTime, watchdog);
+        return new LockConfig(waitTimeout, leaseTime, watchdog)
+                .withFencingRequired(defaultConfig.isFencingRequired());
     }
 
     private String strategyScopedKey(String lockKey) {

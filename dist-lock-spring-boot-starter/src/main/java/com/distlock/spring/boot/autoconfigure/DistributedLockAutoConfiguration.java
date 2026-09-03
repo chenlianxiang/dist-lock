@@ -5,10 +5,12 @@ import com.distlock.core.api.DistributedLocker;
 import com.distlock.core.api.LockConfig;
 import com.distlock.core.api.LockStrategy;
 import com.distlock.core.api.RoutingDistributedLocker;
+import com.distlock.core.fencing.FencingGuard;
 import com.distlock.core.metrics.LockMetrics;
 import com.distlock.core.spi.LockStorageProvider;
 import com.distlock.core.watchdog.WatchdogCoordinator;
 import com.distlock.provider.db.DatabaseLockStorageProvider;
+import com.distlock.provider.db.JdbcFencingGuard;
 import com.distlock.provider.redis.RedisLockStorageProvider;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -17,12 +19,15 @@ import org.springframework.boot.autoconfigure.AutoConfigureAfter;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.actuate.health.HealthIndicator;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.PlatformTransactionManager;
 import io.micrometer.core.instrument.MeterRegistry;
 
 import javax.sql.DataSource;
@@ -39,6 +44,8 @@ import java.util.concurrent.TimeUnit;
 @AutoConfiguration
 @AutoConfigureAfter(name = {
         "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration",
+        "org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration",
+        "org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration",
         "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration"
 })
 @EnableConfigurationProperties(DistributedLockProperties.class)
@@ -76,11 +83,27 @@ public class DistributedLockAutoConfiguration {
         public DefaultDistributedLocker dbLocker(
                 @Qualifier("databaseLockStorageProvider") LockStorageProvider storageProvider,
                 @Qualifier("databaseLockWatchdog") WatchdogCoordinator watchdog,
+                @Qualifier("databaseFencingGuard") ObjectProvider<FencingGuard> fencingGuardProvider,
                 DistributedLockProperties properties,
                 ObjectProvider<LockMetrics> metricsProvider) {
             LockConfig config = createConfig(properties);
             return new DefaultDistributedLocker(storageProvider, watchdog, config, LockStrategy.DATABASE,
-                    metricsProvider.getIfAvailable(() -> LockMetrics.NOOP));
+                    metricsProvider.getIfAvailable(() -> LockMetrics.NOOP),
+                    fencingGuardProvider.getIfAvailable());
+        }
+
+        @Bean(name = "databaseFencingGuard")
+        @ConditionalOnMissingBean(name = "databaseFencingGuard")
+        @ConditionalOnProperty(prefix = "dist-lock", name = "fencing-mode",
+                havingValue = "REQUIRED", matchIfMissing = true)
+        public FencingGuard databaseFencingGuard(
+                DataSource dataSource,
+                ObjectProvider<PlatformTransactionManager> transactionManagers,
+                DistributedLockProperties properties) {
+            PlatformTransactionManager transactionManager = transactionManagers.getIfAvailable(
+                    () -> new DataSourceTransactionManager(dataSource));
+            return new JdbcFencingGuard(dataSource, transactionManager,
+                    Duration.ofMillis(properties.getFencingTransactionTimeout()));
         }
     }
 
@@ -90,6 +113,7 @@ public class DistributedLockAutoConfiguration {
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass({StringRedisTemplate.class, RedisLockStorageProvider.class})
     @ConditionalOnBean(StringRedisTemplate.class)
+    @ConditionalOnProperty(prefix = "dist-lock", name = "fencing-mode", havingValue = "DISABLED")
     public static class RedisLockConfiguration {
 
         @Bean(name = "redisLockStorageProvider")
@@ -117,7 +141,7 @@ public class DistributedLockAutoConfiguration {
                 ObjectProvider<LockMetrics> metricsProvider) {
             LockConfig config = createConfig(properties);
             return new DefaultDistributedLocker(storageProvider, watchdog, config, LockStrategy.REDIS,
-                    metricsProvider.getIfAvailable(() -> LockMetrics.NOOP));
+                    metricsProvider.getIfAvailable(() -> LockMetrics.NOOP), null);
         }
     }
 
@@ -175,6 +199,7 @@ public class DistributedLockAutoConfiguration {
                 properties.getDefaultWaitTimeout(), TimeUnit.MILLISECONDS,
                 properties.getDefaultLeaseTime(), TimeUnit.MILLISECONDS,
                 properties.isWatchdogEnabled()
-        );
+        ).withFencingRequired(properties.getFencingMode()
+                == DistributedLockProperties.FencingMode.REQUIRED);
     }
 }

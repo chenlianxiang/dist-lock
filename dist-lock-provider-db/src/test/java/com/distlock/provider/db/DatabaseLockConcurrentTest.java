@@ -1,6 +1,10 @@
 package com.distlock.provider.db;
 
 import com.distlock.core.api.DefaultDistributedLocker;
+import com.distlock.core.api.LockConfig;
+import com.distlock.core.api.LockStrategy;
+import com.distlock.core.metrics.LockMetrics;
+import com.distlock.core.watchdog.WatchdogCoordinator;
 import com.distlock.core.api.DistributedLocker;
 import com.distlock.core.exception.LockTimeoutException;
 import com.zaxxer.hikari.HikariConfig;
@@ -24,6 +28,7 @@ class DatabaseLockConcurrentTest {
     private static HikariDataSource dataSource;
     private static DatabaseLockStorageProvider storageProvider;
     private static DistributedLocker locker;
+    private static WatchdogCoordinator watchdogCoordinator;
 
     // 自定义业务测试异常
     static class CustomBizException extends RuntimeException {
@@ -84,11 +89,22 @@ class DatabaseLockConcurrentTest {
         populator.execute(dataSource);
 
         storageProvider = new DatabaseLockStorageProvider(dataSource);
-        locker = new DefaultDistributedLocker(storageProvider);
+        watchdogCoordinator = new WatchdogCoordinator(storageProvider);
+        locker = new DefaultDistributedLocker(
+                storageProvider,
+                watchdogCoordinator,
+                LockConfig.defaultConfig().withFencingRequired(false),
+                LockStrategy.DATABASE,
+                LockMetrics.NOOP,
+                null
+        );
     }
 
     @AfterAll
     static void tearDown() {
+        if (watchdogCoordinator != null) {
+            watchdogCoordinator.shutdown();
+        }
         if (dataSource != null) {
             dataSource.close();
         }

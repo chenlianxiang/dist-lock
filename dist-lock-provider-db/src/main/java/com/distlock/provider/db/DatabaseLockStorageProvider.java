@@ -48,6 +48,10 @@ public final class DatabaseLockStorageProvider implements LockStorageProvider {
     private static final String SQL_STORAGE_TIME = "SELECT CURRENT_TIMESTAMP";
     private static final String SQL_FENCING_TOKEN =
             "SELECT version FROM dist_lock WHERE lock_key = ? AND owner = ?";
+    private static final String SQL_FENCE_ROW_COUNT =
+            "SELECT COUNT(*) FROM dist_lock_fence WHERE lock_key = ?";
+    private static final String SQL_INSERT_FENCE_ROW =
+            "INSERT INTO dist_lock_fence (lock_key, fencing_token) VALUES (?, 0)";
 
     public DatabaseLockStorageProvider(DataSource dataSource) {
         this(dataSource, Duration.ofSeconds(3));
@@ -86,6 +90,7 @@ public final class DatabaseLockStorageProvider implements LockStorageProvider {
             // 2. 若更新行数为 0，可能是该 lock_key 首次出现，尚未入库，尝试原子插入
             int inserted = jdbcTemplate.update(SQL_INSERT, lockKey, owner, expireAt);
             if (inserted > 0) {
+                ensureFenceRow(lockKey);
                 return LockAcquisition.acquired(1);
             }
         } catch (DuplicateKeyException ex) {
@@ -144,12 +149,24 @@ public final class DatabaseLockStorageProvider implements LockStorageProvider {
     }
 
     private LockAcquisition acquired(String lockKey, String owner) {
+        ensureFenceRow(lockKey);
         Long token = jdbcTemplate.queryForObject(SQL_FENCING_TOKEN, Long.class, lockKey, owner);
         if (token == null || token <= 0) {
             throw new LockStorageException("acquire", lockKey,
                     new IllegalStateException("Acquired row has no fencing token"));
         }
         return LockAcquisition.acquired(token);
+    }
+
+    private void ensureFenceRow(String lockKey) {
+        try {
+            Integer rows = jdbcTemplate.queryForObject(SQL_FENCE_ROW_COUNT, Integer.class, lockKey);
+            if (rows == null || rows == 0) {
+                jdbcTemplate.update(SQL_INSERT_FENCE_ROW, lockKey);
+            }
+        } catch (DataAccessException exception) {
+            throw new LockStorageException("initialize-fence", lockKey, exception);
+        }
     }
 
     private <T> T inNewTransaction(Supplier<T> action) {
