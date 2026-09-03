@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -30,8 +31,8 @@ class DefaultDistributedLockerSafetyTest {
     void rejectsReentrantLockingAndReleasesOuterLock() {
         Order order = new Order("42");
 
-        assertThatThrownBy(() -> locker.lock(order, Order::id, outer ->
-                locker.lock(order, Order::id, inner -> "unexpected")))
+        assertThatThrownBy(() -> locker.lock(order, Order::id, (Function<Order, String>) outer ->
+                locker.lock(order, Order::id, (Function<Order, String>) inner -> "unexpected")))
                 .isInstanceOf(LockAcquisitionException.class)
                 .hasMessageContaining("Reentrant locking is not supported");
 
@@ -45,14 +46,14 @@ class DefaultDistributedLockerSafetyTest {
         assertThatThrownBy(() -> locker.lock(
                 java.util.Arrays.asList(new Order("1"), null),
                 Order::id,
-                items -> actionCalled.getAndSet(true)))
+                (Function<List<Order>, Boolean>) items -> actionCalled.getAndSet(true)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("must not contain null");
 
         assertThatThrownBy(() -> locker.lock(
                 List.of(new Order(" ")),
                 Order::id,
-                items -> actionCalled.getAndSet(true)))
+                (Function<List<Order>, Boolean>) items -> actionCalled.getAndSet(true)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("must not be blank");
 
@@ -64,7 +65,9 @@ class DefaultDistributedLockerSafetyTest {
     void buildsNamespaceForEveryBatchElement() {
         List<Object> resources = List.of(new Order("1"), new Account("1"));
 
-        locker.lock(resources, resource -> "1", ignored -> true);
+        locker.lock(resources,
+                (Function<Object, String>) resource -> "1",
+                (Function<List<Object>, Boolean>) ignored -> true);
 
         assertThat(storage.acquiredKeys)
                 .contains(Order.class.getName() + ":1", Account.class.getName() + ":1");
