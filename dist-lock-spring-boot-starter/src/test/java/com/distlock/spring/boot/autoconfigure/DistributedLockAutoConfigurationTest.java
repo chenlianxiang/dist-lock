@@ -59,4 +59,17 @@ class DistributedLockAutoConfigurationTest {
             assertThat(health.health().getStatus().getCode()).isEqualTo("UP");
         });
     }
+
+    @Test
+    void startupFailsWhenConfiguredDefaultProviderIsMissing() {
+        contextRunner
+                .withPropertyValues("dist-lock.type=REDIS")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasRootCauseInstanceOf(IllegalStateException.class)
+                            .hasRootCauseMessage("Configured default lock strategy [REDIS] is not available. "
+                                    + "Registered strategies: [DATABASE]");
+                });
+    }
 }

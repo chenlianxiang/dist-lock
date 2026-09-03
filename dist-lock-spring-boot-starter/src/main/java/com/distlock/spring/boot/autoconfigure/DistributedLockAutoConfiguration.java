@@ -142,6 +142,11 @@ public class DistributedLockAutoConfiguration {
                 ? properties.getType().name()
                 : LockStrategy.DATABASE.name();
 
+        if (!lockerMap.containsKey(defaultStrategy)) {
+            throw new IllegalStateException("Configured default lock strategy [" + defaultStrategy
+                    + "] is not available. Registered strategies: " + lockerMap.keySet());
+        }
+
         return new RoutingDistributedLocker(lockerMap, defaultStrategy);
     }
 
