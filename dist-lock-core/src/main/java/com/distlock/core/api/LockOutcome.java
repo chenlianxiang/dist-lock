@@ -24,7 +24,7 @@ public final class LockOutcome<R> {
     private LockOutcome(Status status, R value, List<String> lockKeys, long waitTimeoutMillis) {
         this.status = status;
         this.value = value;
-        this.lockKeys = lockKeys;
+        this.lockKeys = List.copyOf(lockKeys);
         this.waitTimeoutMillis = waitTimeoutMillis;
     }
 
@@ -73,7 +73,7 @@ public final class LockOutcome<R> {
     }
 
     public List<String> lockKeys() {
-        return lockKeys;
+        return List.copyOf(lockKeys);
     }
 
     public long waitTimeoutMillis() {

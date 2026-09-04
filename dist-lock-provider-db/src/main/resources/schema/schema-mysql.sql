@@ -7,3 +7,9 @@ CREATE TABLE IF NOT EXISTS `dist_lock` (
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`lock_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='通用分布式锁租约表';
+
+CREATE TABLE IF NOT EXISTS `dist_lock_fence` (
+  `lock_key` VARCHAR(255) NOT NULL COMMENT '完整锁资源标识',
+  `fencing_token` BIGINT NOT NULL DEFAULT 0 COMMENT '已进入业务提交边界的最大 token',
+  PRIMARY KEY (`lock_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分布式锁业务写入 fencing 表';

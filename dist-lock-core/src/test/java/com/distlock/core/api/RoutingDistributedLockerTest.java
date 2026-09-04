@@ -3,6 +3,7 @@ package com.distlock.core.api;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
@@ -47,7 +48,10 @@ class RoutingDistributedLockerTest {
                                       Function<T, ?> keyExtractor) {
             return LockOperation.create(resourceOrResources, keyExtractor, (snapshot, action) -> {
                 executions.incrementAndGet();
-                return LockOutcome.acquired(action.get());
+                List<LockLease> leases = snapshot.qualifiedKeys().stream()
+                        .map(key -> new LockLease(key, 1))
+                        .toList();
+                return LockOutcome.acquired(action.apply(new LockHandle("recording", leases)));
             });
         }
     }

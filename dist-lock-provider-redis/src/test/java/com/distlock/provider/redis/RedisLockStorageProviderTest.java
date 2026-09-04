@@ -8,11 +8,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.script.RedisScript;
-
-import java.time.Duration;
-import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -26,9 +22,6 @@ class RedisLockStorageProviderTest {
     @Mock
     private StringRedisTemplate redisTemplate;
 
-    @Mock
-    private ValueOperations<String, String> valueOperations;
-
     private RedisLockStorageProvider provider;
 
     @BeforeEach
@@ -37,28 +30,27 @@ class RedisLockStorageProviderTest {
     }
 
     @Test
-    @DisplayName("Redis tryAcquire: 原子 SET NX PX 成功")
+    @DisplayName("Redis tryAcquire: Lua 原子获取并返回 fencing token")
     void testTryAcquireSuccess() {
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.setIfAbsent(eq("order:1001"), eq("node-1"), any(Duration.class)))
-                .thenReturn(Boolean.TRUE);
+        when(redisTemplate.execute(any(RedisScript.class), anyList(), eq("node-1"), eq("30000")))
+                .thenReturn(7L);
 
-        boolean acquired = provider.tryAcquire("order:1001", "node-1", 30000);
+        var acquired = provider.tryAcquire("order:1001", "node-1", 30000);
 
-        assertThat(acquired).isTrue();
-        verify(valueOperations).setIfAbsent(eq("order:1001"), eq("node-1"), eq(Duration.ofMillis(30000)));
+        assertThat(acquired.acquired()).isTrue();
+        assertThat(acquired.fencingToken()).isEqualTo(7);
+        verify(redisTemplate).execute(any(RedisScript.class), anyList(), eq("node-1"), eq("30000"));
     }
 
     @Test
     @DisplayName("Redis tryAcquire: 键已存在争抢失败")
     void testTryAcquireFailure() {
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.setIfAbsent(anyString(), anyString(), any(Duration.class)))
-                .thenReturn(Boolean.FALSE);
+        when(redisTemplate.execute(any(RedisScript.class), anyList(), eq("node-1"), eq("30000")))
+                .thenReturn(0L);
 
-        boolean acquired = provider.tryAcquire("order:1001", "node-1", 30000);
+        var acquired = provider.tryAcquire("order:1001", "node-1", 30000);
 
-        assertThat(acquired).isFalse();
+        assertThat(acquired.acquired()).isFalse();
     }
 
     @Test
@@ -87,7 +79,8 @@ class RedisLockStorageProviderTest {
     @Test
     @DisplayName("Redis 故障必须作为存储异常传播，不能伪装成锁竞争")
     void testStorageFailureIsPropagated() {
-        when(redisTemplate.opsForValue()).thenThrow(new IllegalStateException("redis unavailable"));
+        when(redisTemplate.execute(any(RedisScript.class), anyList(), eq("node-1"), eq("30000")))
+                .thenThrow(new IllegalStateException("redis unavailable"));
 
         assertThatThrownBy(() -> provider.tryAcquire("order:1001", "node-1", 30000))
                 .isInstanceOf(LockStorageException.class)

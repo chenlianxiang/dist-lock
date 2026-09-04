@@ -89,12 +89,22 @@ host:node-uuid:pid:thread-id:acquisition-uuid
 1. 检查当前线程是否已持有相同策略和锁键；
 2. 使用单调时钟建立整批资源的等待预算；
 3. 按排序后的完整键逐个获取；
-4. 每获得一把锁立即启动看门狗；
+4. 记录每把锁的 fencing token，并立即启动看门狗；
 5. 全部获得后统一续期一次，确认所有权仍有效；
-6. 执行业务闭包；
-7. 停止续期并逆序释放。
+6. 强制 fencing 时，由对应 Provider Guard 原子声明 token；
+7. 在 Guard 的同一提交边界内执行业务闭包；
+8. 停止续期并逆序释放。
 
 部分获取失败时执行的是补偿释放，不承诺底层存储层面的原子事务。
+
+DB 策略的强制 fencing 不改变业务调用：
+
+```java
+locker.lock(order, Order::getOrderId)
+    .call(() -> paymentService.pay(order));
+```
+
+`LockHandle` 仍由核心内部携带 owner、完整锁键与 token，但正常业务无需读取。`JdbcFencingGuard` 按锁键排序声明全部 token，任意一个 token 过旧都会回滚整批声明，业务闭包不会执行。
 
 ## 5. 结果与异常语义
 
@@ -124,6 +134,18 @@ WHERE lock_key = ? AND expire_time < ?
 
 不存在记录时通过主键唯一约束竞争 INSERT。当前版本明确不支持重入，相同 owner 也不能覆盖有效租约。
 
+`version` 是该锁键的 fencing token，只在成功获取新租约时递增；续期和释放不会递增。获取、续期、释放均在设置了 SQL/事务超时的独立 `REQUIRES_NEW` 事务中完成，不会被调用方业务事务回滚，也不会把数据库锁租约操作拖入长事务。
+
+成功获取 DB 锁时，Provider 会在同一个获取事务中保证对应的 `dist_lock_fence` 行存在。随后 `JdbcFencingGuard` 执行：
+
+```sql
+UPDATE dist_lock_fence
+SET fencing_token = :token
+WHERE lock_key = :lockKey AND fencing_token < :token;
+```
+
+更新成功后，Guard 在同一个 Spring 事务中执行业务闭包。较旧 token 更新不到行，立即抛出 `FencingRejectedException`。并发的新 token 会等待旧业务事务提交，然后按 token 顺序执行，因此 token 声明和同库业务写入具有一个提交边界。
+
 释放和续期均校验 owner：
 
 ```sql
@@ -133,7 +155,14 @@ WHERE lock_key = ? AND owner = ?;
 
 ## 7. Redis 存储
 
-获取使用 `SET key owner NX PX leaseMillis`。
+获取通过单个 Lua 脚本原子完成：租约键不存在时递增 fencing 键、写入带 TTL 的 owner，并返回新 token。
+
+逻辑锁键会先做 SHA-256，再映射为两个处于同一 Redis Cluster slot 的物理键：
+
+```text
+dist-lock:{<sha256(logical-key)>}:lease
+dist-lock:{<sha256(logical-key)>}:fence
+```
 
 释放：
 
@@ -153,7 +182,9 @@ end
 return 0
 ```
 
-Java 调用必须依次传入 owner 和 leaseMillis。
+Java 调用必须依次传入 owner 和 leaseMillis。健康检查使用 Redis `PING`，租约过期由 Redis 服务端 TTL 决定。
+
+Redis Provider 不依赖也不调用 JDBC。Lua 原子性只覆盖 Redis 内部的租约键和 token 键；任意 Java 闭包、数据库写入、MQ 或 RPC 都无法进入该 Lua 原子边界。因此强制自动 fencing 模式不会装配 Redis Locker，不能用“Redis 取 token 后再查一次”伪装端到端原子性。明确只需要租约互斥时，配置 `fencing-mode: DISABLED`。
 
 ## 8. 策略路由
 
@@ -162,20 +193,56 @@ Java 调用必须依次传入 owner 和 leaseMillis。
 - 未配置 strategy：使用全局默认策略；
 - 已配置 strategy：使用本次操作指定策略；
 - 目标策略未注册：立即抛出配置异常。
+- `fencing-mode: REQUIRED`：只注册具备同组件原子 Guard 的 DB 策略；
+- `fencing-mode: DISABLED`：允许 Redis 或 DB 仅提供租约互斥。
 
 链式配置对象本身不绑定 Spring Bean，创建后可以安全传递和复用。
 
-## 9. 当前边界与后续演进
+## 9. 看门狗与所有权丢失
 
-租约锁无法阻止已经失去租约的旧业务继续写入。生产关键写入需要 fencing token 或等价的业务版本校验。
+看门狗使用可配置大小的调度线程池，默认每个租期的三分之一续期一次，并维护以下状态：
 
-后续设计将在不增加执行重载的前提下扩展：
+| 状态 | 含义 |
+|---|---|
+| `ACTIVE` | 最近一次续期成功 |
+| `DEGRADED` | 暂时性存储故障，仍在租约截止前重试 |
+| `LOST` | owner 不匹配、租约已过期，或失败持续到租约边界 |
+| `STOPPED` | 业务已结束并停止续期 |
 
-```java
-locker.lock(stock, SkuStock::getSkuCode)
-    .fencing(FencingPolicy.REQUIRED)
-    .observability(observation)
-    .call(handle -> inventoryService.deduct(skuId, handle.fencingToken()));
+业务闭包成功后若检测到 `LOST`，组件抛出 `LockLostException`，不能把执行结果当作仍受锁保护。调度延迟、续期失败和活跃任务数同时暴露给指标与健康检查。
+
+## 10. 配置与可观测性
+
+```yaml
+dist-lock:
+  type: DATABASE
+  default-wait-timeout: 3000
+  default-lease-time: 30000
+  watchdog-enabled: true
+  watchdog-threads: 4
+  database-operation-timeout: 3000
+  fencing-mode: REQUIRED
+  fencing-transaction-timeout: 30000
 ```
 
-该阶段需要同步升级存储 SPI 和业务写入契约，在 Issue #1 中单独验收。
+Micrometer 指标包括 `dist.lock.executions`、`dist.lock.execution.duration`、`dist.lock.resources`、`dist.lock.watchdog.renewals` 与 `dist.lock.watchdog.delay`。当 Actuator 存在时，健康指示器会验证每个 Provider 的连接，并报告活跃续期任务数。
+
+## 11. 正确性边界
+
+租约锁本身无法阻止已经失去租约的旧业务继续写入。DB 强制模式通过 `JdbcFencingGuard` 自动提供同库事务 fencing。
+
+- 组件不支持重入；同线程重复获取相同策略和锁键会立即失败；
+- 批量锁采用规范化排序避免循环等待，但获取过程不是跨键原子事务；
+- DB 自动 fencing 只覆盖加入同一 `DataSource`、同一事务管理器和同一事务传播链的写入；
+- 闭包内的 `REQUIRES_NEW`、异步线程、数据库之外的 RPC/MQ/文件副作用不在该原子边界内；
+- Redis 不跨接 JDBC，Redis Lua token 不能自动 fence 外部系统；
+- 看门狗降低意外过期概率，但不能替代幂等、fencing 或业务补偿；
+- namespace 全限定类名是跨节点协议，滚动发布期间不可不兼容地重命名。
+
+## 12. 验证
+
+```bash
+./mvnw --batch-mode --no-transfer-progress clean verify
+```
+
+构建会执行单元测试、真实 MySQL/Redis Testcontainers 集成测试、JaCoCo 覆盖率门禁、SpotBugs 与 Java/Maven 版本约束。

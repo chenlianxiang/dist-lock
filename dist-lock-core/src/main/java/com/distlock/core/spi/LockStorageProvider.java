@@ -14,9 +14,9 @@ public interface LockStorageProvider {
      * @param lockKey     锁资源标识
      * @param owner       持有者全局唯一标识（通常为 NodeId:PID:ThreadId）
      * @param leaseMillis 期望租约有效时长（毫秒）
-     * @return true 获取成功；false 锁已被其他有效租约占有
+     * @return 获取状态；成功时同时返回单调递增的 fencing token
      */
-    boolean tryAcquire(String lockKey, String owner, long leaseMillis);
+    LockAcquisition tryAcquire(String lockKey, String owner, long leaseMillis);
 
     /**
      * 原子释放锁。
@@ -48,4 +48,11 @@ public interface LockStorageProvider {
      * @return 存储端当前系统时间戳（毫秒）
      */
     long getStorageTimeMillis();
+
+    /**
+     * 主动验证底座连通性，供健康检查使用。
+     */
+    default void validateConnectivity() {
+        getStorageTimeMillis();
+    }
 }
