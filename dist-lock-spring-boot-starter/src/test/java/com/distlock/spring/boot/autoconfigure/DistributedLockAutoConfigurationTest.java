@@ -12,11 +12,13 @@ import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.context.FilteredClassLoader;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import javax.sql.DataSource;
 import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 class DistributedLockAutoConfigurationTest {
 
@@ -84,6 +86,7 @@ class DistributedLockAutoConfigurationTest {
     @Test
     void startupFailsWhenConfiguredDefaultProviderIsMissing() {
         contextRunner
+                .withBean(StringRedisTemplate.class, () -> mock(StringRedisTemplate.class))
                 .withPropertyValues("dist-lock.type=REDIS")
                 .run(context -> {
                     assertThat(context).hasFailed();
@@ -91,6 +94,21 @@ class DistributedLockAutoConfigurationTest {
                             .hasRootCauseInstanceOf(IllegalStateException.class)
                             .hasRootCauseMessage("Configured default lock strategy [REDIS] is not available. "
                                     + "Registered strategies: [DATABASE]");
+                });
+    }
+
+    @Test
+    void redisMutexRequiresExplicitlyDisabledFencingMode() {
+        contextRunner
+                .withBean(StringRedisTemplate.class, () -> mock(StringRedisTemplate.class))
+                .withPropertyValues(
+                        "dist-lock.type=REDIS",
+                        "dist-lock.fencing-mode=DISABLED"
+                )
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasBean("redisLocker");
+                    assertThat(context).doesNotHaveBean("databaseFencingGuard");
                 });
     }
 

@@ -9,7 +9,7 @@
 ```text
 dist-lock-core                 核心 API、执行引擎、退避与看门狗
 dist-lock-provider-db          数据库 CAS 租约实现
-dist-lock-provider-redis       Redis SET NX PX 与 Lua 实现
+dist-lock-provider-redis       Redis Lua 原子租约与 token 实现
 dist-lock-spring-boot-starter  Spring Boot 自动配置与策略路由
 dist-lock-example              可运行示例
 ```
@@ -69,6 +69,8 @@ dist-lock:
   watchdog-enabled: true
   watchdog-threads: 4
   database-operation-timeout: 3000
+  fencing-mode: REQUIRED
+  fencing-transaction-timeout: 30000
 ```
 
 ### 3. 执行业务
@@ -103,22 +105,29 @@ OrderResult result = operation
 
 `tryCall` 只把正常的锁竞争超时转换为 `LockOutcome.TIMEOUT`。存储故障、锁所有权丢失和业务异常不会被伪装成普通竞争失败。
 
-关键写入可以取得本次 acquisition 的 fencing token：
+数据库策略在默认的 `REQUIRED` 模式下自动执行 fencing，业务调用点不读取、不传递 token：
 
 ```java
 OrderResult result = locker
     .lock(order, Order::getOrderId)
-    .callWithHandle(handle -> orderRepository.pay(
-        order,
-        handle.fencingToken()
-    ));
+    .call(() -> orderService.pay(order));
 ```
 
-token 由存储层对同一锁键单调递增。它只有在下游写入同时校验“只接受比已记录值更大的 token”时，才能阻止已失去租约的旧持有者覆盖新结果。批量锁可通过 `handle.leases()` 获取每个完整锁键及其 token。
+框架先在 `dist_lock_fence` 中原子声明 token，再在同一 Spring 事务中执行业务闭包。旧 token 会在闭包执行前抛出 `FencingRejectedException`。业务数据库写入必须加入 Guard 使用的同一 `DataSource` 与事务管理器；另起事务、异步线程和外部 RPC 不属于该原子边界。
 
 ## 策略路由
 
-默认使用全局配置的存储策略；单次操作可以覆盖：
+默认使用全局配置的存储策略；只有已装配且满足当前安全模式的策略才能被覆盖选择。
+
+Redis 的 Lua 脚本原子生成 token 并维护租约，但 Java 业务闭包不能和 Redis Lua 组成同一原子操作。框架不会让 Redis 隐式调用 JDBC。默认 `fencing-mode: REQUIRED` 下不装配 Redis Locker；如果场景只需要租约互斥，必须显式选择：
+
+```yaml
+dist-lock:
+  type: REDIS
+  fencing-mode: DISABLED
+```
+
+然后才可使用：
 
 ```java
 boolean success = locker
@@ -127,7 +136,7 @@ boolean success = locker
     .call(() -> stockService.deduct(skuCode));
 ```
 
-如果请求的策略没有装配，执行时立即失败，不会随机回退到其他存储。
+如果请求的策略没有装配，执行时立即失败，不会随机回退到其他存储。Redis 后接数据库、MQ 或 RPC 时，不宣称具有跨组件原子 fencing。
 
 ## Maven
 
@@ -147,7 +156,7 @@ boolean success = locker
 </dependency>
 ```
 
-Redis 模式将 Provider 替换为 `dist-lock-provider-redis`。
+Redis 租约互斥模式将 Provider 替换为 `dist-lock-provider-redis`，并显式配置 `fencing-mode: DISABLED`。
 
 ## 数据库表
 
@@ -156,6 +165,8 @@ MySQL DDL 位于：
 ```text
 dist-lock-provider-db/src/main/resources/schema/schema-mysql.sql
 ```
+
+必须同时迁移 `dist_lock` 与 `dist_lock_fence` 两张表。
 
 ## 验证
 
@@ -183,6 +194,8 @@ GitHub Actions 会在 `main`、`fix/**`、`feat/**` 分支及 Pull Request 上�
 - 批量锁键会去重并按完整键排序，消除循环等待。
 - 每次 acquisition 使用独立 owner token，释放和续期必须匹配本次 owner。
 - 看门狗续期失败超过租约边界或发现 owner 不匹配时，业务返回前会抛出 `LockLostException`。
-- 数据库与 Redis Provider 都返回单调递增的 fencing token；支付、资金、库存等关键写入必须在下游持久化层校验 token，并继续保持业务幂等。
+- DB `REQUIRED` 模式会自动把 token 声明与同库业务闭包放入一个事务，不要求业务手工调度 token。
+- Redis 保证自身 Lua 操作原子，但不与 JDBC、MQ 或 RPC 形成跨组件原子性；这类场景只能明确使用租约互斥，或选择能与目标写入共享事务的 DB 策略。
+- fencing 不能覆盖闭包内主动开启的新事务、异步线程或不可回滚的外部副作用，关键业务仍需保持幂等。
 
 更完整的原理与扩展说明见 [技术规格](document/DOCUMENTATION.md)。
