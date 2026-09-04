@@ -140,11 +140,11 @@ public final class LockOperation {
         return tryCallWithHandle(ignored -> action.get());
     }
 
-    public <R> R callWithHandle(Function<LockHandle, R> action) {
+    <R> R callWithHandle(Function<LockHandle, R> action) {
         return tryCallWithHandle(action).getOrThrow();
     }
 
-    public <R> LockOutcome<R> tryCallWithHandle(Function<LockHandle, R> action) {
+    <R> LockOutcome<R> tryCallWithHandle(Function<LockHandle, R> action) {
         Objects.requireNonNull(action, "action must not be null");
         @SuppressWarnings("unchecked")
         LockOutcome<R> outcome = (LockOutcome<R>) executor.execute(snapshot, action);
