@@ -23,3 +23,7 @@ For production, assign exactly one authoritative storage backend per lock domain
 ## Validation
 
 Run `mvn --batch-mode --no-transfer-progress clean verify` and perform Redis/MySQL integration tests before merging. This branch has not been locally compiled or tested by the authoring assistant.
+
+## Current watchdog detection behavior
+
+The watchdog now records renewal failures and the executor checks the recorded state after the business callback. This can report an unsafe execution, but **cannot roll back writes already committed** by the callback. It does not replace downstream fencing and must not be represented as a strong consistency guarantee. The failure state is cleared during lock cleanup.
