@@ -156,7 +156,14 @@ public class DefaultDistributedLocker implements DistributedLocker, AutoCloseabl
             for (String key : acquiredKeys) {
                 threadHeldKeys.add(strategyScopedKey(key));
             }
-            return LockOutcome.acquired(action.get());
+            Object result = action.get();
+            for (String key : acquiredKeys) {
+                if (config.isWatchdogEnabled() && watchdogCoordinator.hasLostLease(key, owner)) {
+                    throw new LockAcquisitionException(key,
+                            "Lock lease renewal failed during business execution for [" + key + "]");
+                }
+            }
+            return LockOutcome.acquired(result);
         } finally {
             for (String key : acquiredKeys) {
                 threadHeldKeys.remove(strategyScopedKey(key));
@@ -166,6 +173,9 @@ public class DefaultDistributedLocker implements DistributedLocker, AutoCloseabl
             }
             if (!acquiredKeys.isEmpty()) {
                 cleanupKeys(acquiredKeys, owner, config.isWatchdogEnabled());
+                for (String key : acquiredKeys) {
+                    watchdogCoordinator.clearLeaseState(key, owner);
+                }
             }
         }
     }
