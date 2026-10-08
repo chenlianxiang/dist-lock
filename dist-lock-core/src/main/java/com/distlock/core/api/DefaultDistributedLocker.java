@@ -27,6 +27,7 @@ public class DefaultDistributedLocker implements DistributedLocker {
     private static final ThreadLocal<Set<String>> HELD_LOCK_KEYS = ThreadLocal.withInitial(HashSet::new);
 
     private final LockStorageProvider storageProvider;
+    // Process-local safety guard only; a distributed policy is still required.
     private static final java.util.concurrent.ConcurrentMap<String, LockStrategy> RESOURCE_STRATEGIES = new java.util.concurrent.ConcurrentHashMap<>();
     private final WatchdogCoordinator watchdogCoordinator;
     private final LockConfig defaultConfig;
@@ -76,6 +77,12 @@ public class DefaultDistributedLocker implements DistributedLocker {
         LockConfig config = resolveConfig(snapshot);
         // Fail closed when a resource is routed to conflicting backends in this JVM.
         // Cross-process enforcement requires an externally coordinated policy.
+        for (String key : snapshot.qualifiedKeys()) {
+            LockStrategy existing = RESOURCE_STRATEGIES.get(key);
+            if (existing != null && existing != currentStrategy) {
+                throw new IllegalStateException("Conflicting lock backend for resource [" + key + "]: " + existing + " vs " + currentStrategy);
+            }
+        }
         for (String key : snapshot.qualifiedKeys()) {
             LockStrategy existing = RESOURCE_STRATEGIES.putIfAbsent(key, currentStrategy);
             if (existing != null && existing != currentStrategy) {
