@@ -141,8 +141,6 @@ public class DefaultDistributedLocker implements DistributedLocker, AutoCloseabl
                 if (!acquiredThis) {
                     log.warn("Failed to acquire all locks [{}], rolling back acquired [{}]",
                             sortedKeys, acquiredKeys);
-                    cleanupKeys(acquiredKeys, owner, config.isWatchdogEnabled());
-                    acquiredKeys.clear();
                     return LockOutcome.timeout(sortedKeys, waitTimeoutMillis);
                 }
             }
