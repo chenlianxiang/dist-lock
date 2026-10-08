@@ -51,7 +51,7 @@ public class DatabaseLockStorageProvider implements LockStorageProvider {
     @Override
     public boolean tryAcquire(String lockKey, String owner, long leaseMillis) {
         long now = getStorageTimeMillis();
-        long expireAt = now + leaseMillis;
+        long expireAt = Math.addExact(now, leaseMillis);
 
         // 1. 先尝试通过 CAS UPDATE 抢占过期租约（适用于表中已有记录的热锁场景）
         try {
@@ -91,7 +91,7 @@ public class DatabaseLockStorageProvider implements LockStorageProvider {
     @Override
     public boolean renew(String lockKey, String owner, long leaseMillis) {
         long now = getStorageTimeMillis();
-        long newExpireAt = now + leaseMillis;
+        long newExpireAt = Math.addExact(now, leaseMillis);
 
         try {
             return jdbcTemplate.update(SQL_RENEW, newExpireAt, lockKey, owner, now) > 0;

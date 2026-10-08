@@ -21,12 +21,14 @@ import java.util.function.Supplier;
 /**
  * 绑定单一存储策略的默认锁执行器。
  */
-public class DefaultDistributedLocker implements DistributedLocker {
+public class DefaultDistributedLocker implements DistributedLocker, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(DefaultDistributedLocker.class);
     private static final ThreadLocal<Set<String>> HELD_LOCK_KEYS = ThreadLocal.withInitial(HashSet::new);
 
     private final LockStorageProvider storageProvider;
+    // Process-local safety guard only; a distributed policy is still required.
+    private static final java.util.concurrent.ConcurrentMap<String, LockStrategy> RESOURCE_STRATEGIES = new java.util.concurrent.ConcurrentHashMap<>();
     private final WatchdogCoordinator watchdogCoordinator;
     private final LockConfig defaultConfig;
     private final LockStrategy currentStrategy;
@@ -73,6 +75,20 @@ public class DefaultDistributedLocker implements DistributedLocker {
         }
 
         LockConfig config = resolveConfig(snapshot);
+        // Fail closed when a resource is routed to conflicting backends in this JVM.
+        // Cross-process enforcement requires an externally coordinated policy.
+        for (String key : snapshot.qualifiedKeys()) {
+            LockStrategy existing = RESOURCE_STRATEGIES.get(key);
+            if (existing != null && existing != currentStrategy) {
+                throw new IllegalStateException("Conflicting lock backend for resource [" + key + "]: " + existing + " vs " + currentStrategy);
+            }
+        }
+        for (String key : snapshot.qualifiedKeys()) {
+            LockStrategy existing = RESOURCE_STRATEGIES.putIfAbsent(key, currentStrategy);
+            if (existing != null && existing != currentStrategy) {
+                throw new IllegalStateException("Conflicting lock backend for resource [" + key + "]: " + existing + " vs " + currentStrategy);
+            }
+        }
         List<String> sortedKeys = snapshot.qualifiedKeys();
         Set<String> threadHeldKeys = HELD_LOCK_KEYS.get();
         List<String> reentrantKeys = sortedKeys.stream()
@@ -125,8 +141,6 @@ public class DefaultDistributedLocker implements DistributedLocker {
                 if (!acquiredThis) {
                     log.warn("Failed to acquire all locks [{}], rolling back acquired [{}]",
                             sortedKeys, acquiredKeys);
-                    cleanupKeys(acquiredKeys, owner, config.isWatchdogEnabled());
-                    acquiredKeys.clear();
                     return LockOutcome.timeout(sortedKeys, waitTimeoutMillis);
                 }
             }
@@ -142,7 +156,14 @@ public class DefaultDistributedLocker implements DistributedLocker {
             for (String key : acquiredKeys) {
                 threadHeldKeys.add(strategyScopedKey(key));
             }
-            return LockOutcome.acquired(action.get());
+            Object result = action.get();
+            for (String key : acquiredKeys) {
+                if (config.isWatchdogEnabled() && watchdogCoordinator.hasLostLease(key, owner)) {
+                    throw new LockAcquisitionException(key,
+                            "Lock lease renewal failed during business execution for [" + key + "]");
+                }
+            }
+            return LockOutcome.acquired(result);
         } finally {
             for (String key : acquiredKeys) {
                 threadHeldKeys.remove(strategyScopedKey(key));
@@ -152,8 +173,16 @@ public class DefaultDistributedLocker implements DistributedLocker {
             }
             if (!acquiredKeys.isEmpty()) {
                 cleanupKeys(acquiredKeys, owner, config.isWatchdogEnabled());
+                for (String key : acquiredKeys) {
+                    watchdogCoordinator.clearLeaseState(key, owner);
+                }
             }
         }
+    }
+
+    @Override
+    public void close() {
+        watchdogCoordinator.shutdown();
     }
 
     private LockConfig resolveConfig(LockOperation.Snapshot snapshot) {

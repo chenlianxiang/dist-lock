@@ -15,13 +15,14 @@ import java.util.concurrent.*;
  * 3. 当业务结束（释放锁）、发生异常或持有线程退出时，停止续约任务；
  * 4. 守护线程调度，不阻塞 JVM 正常退出。
  */
-public class WatchdogCoordinator {
+public class WatchdogCoordinator implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(WatchdogCoordinator.class);
 
     private final LockStorageProvider storageProvider;
     private final ScheduledExecutorService scheduler;
     private final ConcurrentMap<String, ScheduledFuture<?>> activeTasks = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, Boolean> lostLeases = new ConcurrentHashMap<>();
 
     public WatchdogCoordinator(LockStorageProvider storageProvider) {
         this.storageProvider = storageProvider;
@@ -45,6 +46,7 @@ public class WatchdogCoordinator {
             throw new IllegalArgumentException("leaseMillis must be greater than 0");
         }
         long period = Math.max(1, leaseMillis / 3);
+        lostLeases.remove(taskKey);
 
         ScheduledFuture<?> future = scheduler.scheduleAtFixedRate(() -> {
             try {
@@ -52,11 +54,14 @@ public class WatchdogCoordinator {
                 boolean renewed = storageProvider.renew(lockKey, owner, leaseMillis);
                 if (!renewed) {
                     log.warn("Watchdog renewal failed for lock [{}] (lock lost or expired), canceling renew task", lockKey);
+                    lostLeases.put(taskKey, Boolean.TRUE);
                     stopRenew(lockKey, owner);
                 } else {
                     log.debug("Watchdog successfully renewed lock [{}] for next {} ms", lockKey, leaseMillis);
                 }
             } catch (Throwable t) {
+                lostLeases.put(taskKey, Boolean.TRUE);
+                stopRenew(lockKey, owner);
                 log.error("Watchdog encountered error during renew for lock [{}]", lockKey, t);
             }
         }, period, period, TimeUnit.MILLISECONDS);
@@ -82,6 +87,14 @@ public class WatchdogCoordinator {
         }
     }
 
+    public boolean hasLostLease(String lockKey, String owner) {
+        return Boolean.TRUE.equals(lostLeases.get(buildTaskKey(lockKey, owner)));
+    }
+
+    public void clearLeaseState(String lockKey, String owner) {
+        lostLeases.remove(buildTaskKey(lockKey, owner));
+    }
+
     private String buildTaskKey(String lockKey, String owner) {
         return lockKey + "#" + owner;
     }
@@ -89,8 +102,14 @@ public class WatchdogCoordinator {
     /**
      * 优雅关闭看门狗调度器。
      */
+    @Override
+    public void close() {
+        shutdown();
+    }
+
     public void shutdown() {
         scheduler.shutdownNow();
         activeTasks.clear();
+        lostLeases.clear();
     }
 }

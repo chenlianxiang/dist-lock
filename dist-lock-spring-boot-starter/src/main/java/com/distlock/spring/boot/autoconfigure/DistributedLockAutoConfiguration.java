@@ -55,12 +55,12 @@ public class DistributedLockAutoConfiguration {
             return new DatabaseLockStorageProvider(dataSource);
         }
 
-        @Bean(name = "dbLocker")
+        @Bean(name = "dbLocker", destroyMethod = "close")
         @ConditionalOnMissingBean(name = "dbLocker")
         public DefaultDistributedLocker dbLocker(@Qualifier("databaseLockStorageProvider") LockStorageProvider storageProvider,
                                                  DistributedLockProperties properties) {
             LockConfig config = createConfig(properties);
-            return new DefaultDistributedLocker(storageProvider, new WatchdogCoordinator(storageProvider), config, LockStrategy.DATABASE);
+            return new DefaultDistributedLocker(storageProvider, watchdogCoordinator(storageProvider), config, LockStrategy.DATABASE);
         }
     }
 
@@ -78,12 +78,12 @@ public class DistributedLockAutoConfiguration {
             return new RedisLockStorageProvider(redisTemplate);
         }
 
-        @Bean(name = "redisLocker")
+        @Bean(name = "redisLocker", destroyMethod = "close")
         @ConditionalOnMissingBean(name = "redisLocker")
         public DefaultDistributedLocker redisLocker(@Qualifier("redisLockStorageProvider") LockStorageProvider storageProvider,
                                                     DistributedLockProperties properties) {
             LockConfig config = createConfig(properties);
-            return new DefaultDistributedLocker(storageProvider, new WatchdogCoordinator(storageProvider), config, LockStrategy.REDIS);
+            return new DefaultDistributedLocker(storageProvider, watchdogCoordinator(storageProvider), config, LockStrategy.REDIS);
         }
     }
 
@@ -109,6 +109,10 @@ public class DistributedLockAutoConfiguration {
                 : LockStrategy.DATABASE.name();
 
         return new RoutingDistributedLocker(lockerMap, defaultStrategy);
+    }
+
+    private static WatchdogCoordinator watchdogCoordinator(LockStorageProvider provider) {
+        return new WatchdogCoordinator(provider);
     }
 
     private static LockConfig createConfig(DistributedLockProperties properties) {
