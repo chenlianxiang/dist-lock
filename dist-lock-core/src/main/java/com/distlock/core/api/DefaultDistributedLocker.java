@@ -21,7 +21,7 @@ import java.util.function.Supplier;
 /**
  * 绑定单一存储策略的默认锁执行器。
  */
-public class DefaultDistributedLocker implements DistributedLocker {
+public class DefaultDistributedLocker implements DistributedLocker, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(DefaultDistributedLocker.class);
     private static final ThreadLocal<Set<String>> HELD_LOCK_KEYS = ThreadLocal.withInitial(HashSet::new);
@@ -170,6 +170,11 @@ public class DefaultDistributedLocker implements DistributedLocker {
                 cleanupKeys(acquiredKeys, owner, config.isWatchdogEnabled());
             }
         }
+    }
+
+    @Override
+    public void close() {
+        watchdogCoordinator.shutdown();
     }
 
     private LockConfig resolveConfig(LockOperation.Snapshot snapshot) {
