@@ -15,7 +15,7 @@ import java.util.concurrent.*;
  * 3. 当业务结束（释放锁）、发生异常或持有线程退出时，停止续约任务；
  * 4. 守护线程调度，不阻塞 JVM 正常退出。
  */
-public class WatchdogCoordinator {
+public class WatchdogCoordinator implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(WatchdogCoordinator.class);
 
@@ -89,6 +89,11 @@ public class WatchdogCoordinator {
     /**
      * 优雅关闭看门狗调度器。
      */
+    @Override
+    public void close() {
+        shutdown();
+    }
+
     public void shutdown() {
         scheduler.shutdownNow();
         activeTasks.clear();
