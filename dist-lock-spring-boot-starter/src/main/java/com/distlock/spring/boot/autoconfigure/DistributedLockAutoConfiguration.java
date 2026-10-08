@@ -55,7 +55,7 @@ public class DistributedLockAutoConfiguration {
             return new DatabaseLockStorageProvider(dataSource);
         }
 
-        @Bean(name = "dbLocker")
+        @Bean(name = "dbLocker", destroyMethod = "close")
         @ConditionalOnMissingBean(name = "dbLocker")
         public DefaultDistributedLocker dbLocker(@Qualifier("databaseLockStorageProvider") LockStorageProvider storageProvider,
                                                  DistributedLockProperties properties) {
@@ -78,7 +78,7 @@ public class DistributedLockAutoConfiguration {
             return new RedisLockStorageProvider(redisTemplate);
         }
 
-        @Bean(name = "redisLocker")
+        @Bean(name = "redisLocker", destroyMethod = "close")
         @ConditionalOnMissingBean(name = "redisLocker")
         public DefaultDistributedLocker redisLocker(@Qualifier("redisLockStorageProvider") LockStorageProvider storageProvider,
                                                     DistributedLockProperties properties) {
